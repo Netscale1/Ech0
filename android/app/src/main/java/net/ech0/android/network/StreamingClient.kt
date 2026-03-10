@@ -50,6 +50,8 @@ class StreamingClient(
                 protocolVersion = 1,
                 token = config.token,
                 deviceName = config.deviceName,
+                senderId = config.senderId,
+                trustedSecret = config.trustedSecret,
                 sampleRate = config.sampleRate,
                 channels = config.channels,
                 frameMs = config.frameMs,

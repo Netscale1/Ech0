@@ -13,6 +13,7 @@ import androidx.core.app.NotificationManagerCompat
 import net.ech0.android.MainActivity
 import net.ech0.android.R
 import net.ech0.android.audio.AudioCaptureEngine
+import net.ech0.android.model.AudioInputProfile
 import net.ech0.android.model.SessionConfig
 import net.ech0.android.model.SessionPhase
 import net.ech0.android.model.SessionState
@@ -123,6 +124,11 @@ class StreamingService : Service() {
                     break
                 }
 
+                TrustedReconnectStore.rememberReceiver(
+                    applicationContext,
+                    host = config.host,
+                    port = config.port,
+                )
                 SessionStore.update {
                     it.copy(
                         phase = SessionPhase.Streaming,
@@ -154,6 +160,8 @@ class StreamingService : Service() {
                 )
 
                 val captureEngine = AudioCaptureEngine(
+                    audioSource = config.audioInputProfile.audioSource,
+                    enableVoiceProcessing = config.enableVoiceProcessing,
                     sampleRate = config.sampleRate,
                     frameMs = config.frameMs,
                 )
@@ -263,6 +271,12 @@ class StreamingService : Service() {
             port = intent.getIntExtra(EXTRA_PORT, DEFAULT_PORT),
             token = requireNotNull(intent.getStringExtra(EXTRA_TOKEN)),
             deviceName = requireNotNull(intent.getStringExtra(EXTRA_DEVICE_NAME)),
+            senderId = requireNotNull(intent.getStringExtra(EXTRA_SENDER_ID)),
+            trustedSecret = requireNotNull(intent.getStringExtra(EXTRA_TRUSTED_SECRET)),
+            audioInputProfile = AudioInputProfile.valueOf(
+                requireNotNull(intent.getStringExtra(EXTRA_AUDIO_INPUT_PROFILE)),
+            ),
+            enableVoiceProcessing = intent.getBooleanExtra(EXTRA_ENABLE_VOICE_PROCESSING, true),
         )
     }
 
@@ -272,7 +286,7 @@ class StreamingService : Service() {
 
     private fun buildNotification(contentText: String) =
         NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_call_record)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle("Ech0 sender")
             .setContentText(contentText)
             .setOngoing(true)
@@ -312,10 +326,14 @@ class StreamingService : Service() {
         private const val ACTION_STOP = "net.ech0.android.action.STOP"
         private const val ACTION_SET_MUTED = "net.ech0.android.action.SET_MUTED"
         private const val EXTRA_DEVICE_NAME = "extra_device_name"
+        private const val EXTRA_AUDIO_INPUT_PROFILE = "extra_audio_input_profile"
+        private const val EXTRA_ENABLE_VOICE_PROCESSING = "extra_enable_voice_processing"
         private const val EXTRA_HOST = "extra_host"
         private const val EXTRA_MUTED = "extra_muted"
         private const val EXTRA_PORT = "extra_port"
+        private const val EXTRA_SENDER_ID = "extra_sender_id"
         private const val EXTRA_TOKEN = "extra_token"
+        private const val EXTRA_TRUSTED_SECRET = "extra_trusted_secret"
         private const val FLAG_MUTED = 1
         private const val DEFAULT_PORT = 48_484
         private const val NOTIFICATION_CHANNEL_ID = "ech0-streaming"
@@ -328,6 +346,10 @@ class StreamingService : Service() {
                 putExtra(EXTRA_PORT, config.port)
                 putExtra(EXTRA_TOKEN, config.token)
                 putExtra(EXTRA_DEVICE_NAME, config.deviceName)
+                putExtra(EXTRA_SENDER_ID, config.senderId)
+                putExtra(EXTRA_TRUSTED_SECRET, config.trustedSecret)
+                putExtra(EXTRA_AUDIO_INPUT_PROFILE, config.audioInputProfile.name)
+                putExtra(EXTRA_ENABLE_VOICE_PROCESSING, config.enableVoiceProcessing)
             }
         }
 

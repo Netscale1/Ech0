@@ -2,7 +2,6 @@ package net.ech0.android.protocol
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import net.ech0.android.model.SessionConfig
 
 @Serializable
 data class PairingPayload(
@@ -11,15 +10,6 @@ data class PairingPayload(
     val port: Int,
     val token: String,
 ) {
-    fun toSessionConfig(deviceName: String): SessionConfig {
-        return SessionConfig(
-            host = host,
-            port = port,
-            token = token,
-            deviceName = deviceName,
-        )
-    }
-
     companion object {
         private val json = Json {
             ignoreUnknownKeys = true

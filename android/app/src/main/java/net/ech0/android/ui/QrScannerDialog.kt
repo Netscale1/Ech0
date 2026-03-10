@@ -1,9 +1,9 @@
 package net.ech0.android.ui
 
-import androidx.camera.core.CameraController
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.view.CameraController
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Arrangement
@@ -43,7 +43,7 @@ fun QrScannerDialog(
     val controller = remember {
         LifecycleCameraController(context).apply {
             cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-            setEnabledUseCases(CameraController.PREVIEW or CameraController.IMAGE_ANALYSIS)
+            setEnabledUseCases(CameraController.IMAGE_ANALYSIS)
         }
     }
 
