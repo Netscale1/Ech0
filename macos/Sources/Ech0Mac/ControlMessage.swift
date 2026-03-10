@@ -9,6 +9,8 @@ struct ClientHello: Codable {
     let protocolVersion: Int
     let token: String
     let deviceName: String
+    let senderId: String?
+    let trustedSecret: String?
     let sampleRate: Int
     let channels: Int
     let frameMs: Int
@@ -81,4 +83,3 @@ enum ControlMessageCodec {
         }
     }
 }
-

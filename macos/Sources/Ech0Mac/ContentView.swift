@@ -12,6 +12,7 @@ struct ContentView: View {
                     statusCard
                 }
                 setupCard
+                trustedDevicesCard
                 logsCard
             }
             .padding(24)
@@ -100,6 +101,7 @@ struct ContentView: View {
             Text("Receiver Status")
                 .font(.title2.weight(.semibold))
 
+            audioLevelMeter
             metricRow(label: "Frames received", value: "\(model.metrics.framesReceived)")
             metricRow(label: "Buffered", value: "\(model.metrics.bufferedMs) ms")
             metricRow(label: "Target buffer", value: "\(model.metrics.targetBufferMs) ms")
@@ -131,6 +133,48 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 
+    private var audioLevelMeter: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Input level")
+                Spacer()
+                Text("\(Int(model.metrics.inputLevel * 100))%")
+                    .fontWeight(.medium)
+            }
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.black.opacity(0.08))
+
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.18, green: 0.62, blue: 0.38),
+                                    Color(red: 0.96, green: 0.68, blue: 0.18),
+                                    Color(red: 0.78, green: 0.21, blue: 0.20),
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: geometry.size.width * model.metrics.inputLevel)
+
+                    Rectangle()
+                        .fill(Color.black.opacity(0.7))
+                        .frame(width: 2)
+                        .offset(x: max(0, geometry.size.width * model.metrics.peakLevel - 1))
+                }
+            }
+            .frame(height: 18)
+
+            Text(model.connectionLabel == "Streaming" ? "Live audio activity from the phone." : "Waiting for audio frames from the phone.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     private var setupCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("BlackHole Checklist")
@@ -143,6 +187,48 @@ struct ContentView: View {
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(red: 0.98, green: 0.97, blue: 0.94))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+
+    private var trustedDevicesCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Trusted Devices")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Text("\(model.trustedDevices.count)/2 remembered")
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Trusted reconnect becomes active after the Android app starts sending a persistent sender ID and trusted secret.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if model.trustedDevices.isEmpty {
+                Text("No trusted devices remembered yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(model.trustedDevices) { device in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(device.deviceName)
+                                .fontWeight(.medium)
+                            Text("Last seen \(device.lastSeenAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Forget") {
+                            model.forgetTrustedDevice(device)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.92))
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 

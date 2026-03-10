@@ -46,6 +46,20 @@ enum SystemAudio {
         try setDefaultInputDevice(id: device.id)
     }
 
+    static func nominalSampleRate(named name: String) throws -> Double {
+        guard let device = deviceNamed(name) else {
+            throw ReceiverError.audioDeviceNotFound(name)
+        }
+        return try nominalSampleRate(id: device.id)
+    }
+
+    static func setNominalSampleRate(named name: String, sampleRate: Double) throws {
+        guard let device = deviceNamed(name) else {
+            throw ReceiverError.audioDeviceNotFound(name)
+        }
+        try setNominalSampleRate(id: device.id, sampleRate: sampleRate)
+    }
+
     static func setDefaultInputDevice(id: AudioDeviceID) throws {
         var deviceID = id
         var address = AudioObjectPropertyAddress(
@@ -60,6 +74,46 @@ enum SystemAudio {
             nil,
             UInt32(MemoryLayout<AudioDeviceID>.size),
             &deviceID
+        )
+        guard status == noErr else {
+            throw ReceiverError.coreAudio(status)
+        }
+    }
+
+    private static func nominalSampleRate(id: AudioDeviceID) throws -> Double {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var sampleRate = Float64.zero
+        var size = UInt32(MemoryLayout<Float64>.size)
+        let status = AudioObjectGetPropertyData(id, &address, 0, nil, &size, &sampleRate)
+        guard status == noErr else {
+            throw ReceiverError.coreAudio(status)
+        }
+        return sampleRate
+    }
+
+    private static func setNominalSampleRate(id: AudioDeviceID, sampleRate: Double) throws {
+        let current = try nominalSampleRate(id: id)
+        if abs(current - sampleRate) < 1 {
+            return
+        }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value = sampleRate
+        let status = AudioObjectSetPropertyData(
+            id,
+            &address,
+            0,
+            nil,
+            UInt32(MemoryLayout<Float64>.size),
+            &value
         )
         guard status == noErr else {
             throw ReceiverError.coreAudio(status)

@@ -17,6 +17,8 @@ final class ReceiverServer {
     var onAudioFrame: ((AudioFrame) -> Void)?
     var onLog: ((String) -> Void)?
     var onStateChange: ((ConnectionState) -> Void)?
+    var authenticateTrustedSender: ((ClientHello) -> Bool)?
+    var trustSenderFromPairing: ((ClientHello) -> Void)?
 
     private let queue = DispatchQueue(label: "net.ech0.receiver.server")
     private let targetBufferMs: Int
@@ -200,7 +202,9 @@ final class ReceiverServer {
                 reject(connection: connection, reason: "unsupportedProtocol")
                 return
             }
-            guard hello.token == expectedToken else {
+            let acceptedByToken = hello.token == expectedToken
+            let acceptedByTrustedIdentity = authenticateTrustedSender?(hello) ?? false
+            guard acceptedByToken || acceptedByTrustedIdentity else {
                 reject(connection: connection, reason: "invalidToken")
                 return
             }
@@ -211,6 +215,9 @@ final class ReceiverServer {
 
             context.didHandshake = true
             context.deviceName = hello.deviceName
+            if acceptedByToken {
+                trustSenderFromPairing?(hello)
+            }
             sendControl(
                 .serverHello(
                     ServerHello(
@@ -221,7 +228,8 @@ final class ReceiverServer {
                 ),
                 on: connection
             )
-            onLog?("Accepted sender \(hello.deviceName).")
+            let authMode = acceptedByTrustedIdentity && !acceptedByToken ? "trusted device" : "pairing token"
+            onLog?("Accepted sender \(hello.deviceName) via \(authMode).")
             onStateChange?(.connected(deviceName: hello.deviceName))
 
         case .ping(let ping):
