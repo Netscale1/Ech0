@@ -19,6 +19,7 @@ class AudioCaptureEngine(
     private val sampleRate: Int = 48_000,
     private val frameMs: Int = 20,
     private val audioSource: Int = MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+    private val enableVoiceProcessing: Boolean = true,
 ) {
     suspend fun run(
         isMuted: () -> Boolean,
@@ -99,10 +100,15 @@ class AudioCaptureEngine(
             sum += normalized * normalized
         }
         val rms = sqrt(sum / buffer.size.toDouble()).toFloat()
-        return (rms * 5f).coerceIn(0f, 1f)
+        // Lift quiet speech in the on-screen meter without changing transmitted audio.
+        return (sqrt(rms.toDouble()).toFloat() * 1.6f).coerceIn(0f, 1f)
     }
 
     private fun createEffects(audioSessionId: Int): List<AudioEffect> {
+        if (!enableVoiceProcessing) {
+            return emptyList()
+        }
+
         val effects = mutableListOf<AudioEffect>()
 
         if (NoiseSuppressor.isAvailable()) {

@@ -1,10 +1,10 @@
 package net.ech0.android.protocol
 
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.parseToJsonElement
 
 sealed interface ControlMessage {
     val kind: String
@@ -16,6 +16,8 @@ data class ClientHello(
     val protocolVersion: Int,
     val token: String,
     val deviceName: String,
+    val senderId: String? = null,
+    val trustedSecret: String? = null,
     val sampleRate: Int,
     val channels: Int,
     val frameMs: Int,
@@ -47,8 +49,10 @@ data class Stop(
     val reason: String,
 ) : ControlMessage
 
+@OptIn(ExperimentalSerializationApi::class)
 object ControlMessageJson {
     private val json = Json {
+        encodeDefaults = true
         ignoreUnknownKeys = true
         explicitNulls = false
     }
@@ -61,11 +65,11 @@ object ControlMessageJson {
             is Pong -> json.encodeToString(Pong.serializer(), message)
             is Stop -> json.encodeToString(Stop.serializer(), message)
         }
-        return serialized.encodeToByteArray()
+        return serialized.toByteArray()
     }
 
     fun decode(payload: ByteArray): ControlMessage {
-        val document = json.parseToJsonElement(payload.decodeToString()) as JsonObject
+        val document = json.decodeFromString(JsonObject.serializer(), payload.toString(Charsets.UTF_8))
         return when (document["kind"]?.jsonPrimitive?.content) {
             "clientHello" -> json.decodeFromJsonElement(ClientHello.serializer(), document)
             "serverHello" -> json.decodeFromJsonElement(ServerHello.serializer(), document)
