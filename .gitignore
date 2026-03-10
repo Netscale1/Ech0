@@ -1,0 +1,12 @@
+.DS_Store
+.gradle/
+.idea/
+/.build/
+/DerivedData/
+/android/.idea/
+/android/local.properties
+/android/app/build/
+/android/build/
+/android/captures/
+/macos/.swiftpm/
+*.log
