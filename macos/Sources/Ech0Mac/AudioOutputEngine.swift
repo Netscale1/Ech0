@@ -182,8 +182,6 @@ final class AudioOutputEngine {
 }
 
 private let ech0RenderCallback: AURenderCallback = { refCon, _, _, _, frameCount, ioData in
-    guard let refCon else { return noErr }
     let engine = Unmanaged<AudioOutputEngine>.fromOpaque(refCon).takeUnretainedValue()
     return engine.render(frameCount: Int(frameCount), ioData: ioData)
 }
-

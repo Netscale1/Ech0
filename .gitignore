@@ -2,6 +2,7 @@
 .gradle/
 .idea/
 /.build/
+/macos/.build/
 /DerivedData/
 /android/.idea/
 /android/local.properties
