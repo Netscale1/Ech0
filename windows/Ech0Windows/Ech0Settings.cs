@@ -1,7 +1,15 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Ech0.Windows;
+
+internal enum PairingState
+{
+    Unpaired,
+    PairingPending,
+    Trusted,
+}
 
 internal sealed class Ech0Settings
 {
@@ -12,10 +20,22 @@ internal sealed class Ech0Settings
     public string SenderId { get; set; } = Guid.NewGuid().ToString("D");
     public string ProtectedTrustedSecret { get; set; } = "";
     public string ProtectedPairingToken { get; set; } = "";
+    public string ReceiverId { get; set; } = "";
+    public string ReceiverName { get; set; } = "";
+    public bool TrustConfirmed { get; set; }
     public bool LaunchAtLogin { get; set; } = true;
 
-    public bool IsConfigured => !string.IsNullOrWhiteSpace(Host) && !string.IsNullOrWhiteSpace(ProtectedPairingToken);
+    [JsonIgnore]
+    public PairingState PairingState => TrustConfirmed && !string.IsNullOrWhiteSpace(ReceiverId)
+        ? PairingState.Trusted
+        : !string.IsNullOrWhiteSpace(ProtectedPairingToken)
+            ? PairingState.PairingPending
+            : PairingState.Unpaired;
 
+    [JsonIgnore]
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(Host) && PairingState != PairingState.Unpaired;
+
+    [JsonIgnore]
     public string TrustedSecret
     {
         get
@@ -30,10 +50,65 @@ internal sealed class Ech0Settings
         }
     }
 
+    [JsonIgnore]
     public string PairingToken
     {
         get => string.IsNullOrEmpty(ProtectedPairingToken) ? "" : SettingsStore.Unprotect(ProtectedPairingToken);
-        set => ProtectedPairingToken = SettingsStore.Protect(value);
+        set => ProtectedPairingToken = string.IsNullOrEmpty(value) ? "" : SettingsStore.Protect(value);
+    }
+
+    public bool TryCompleteTrust(ServerHello hello)
+    {
+        if (hello.TrustEstablished != true || string.IsNullOrWhiteSpace(hello.ReceiverId))
+        {
+            return false;
+        }
+
+        var receiverName = string.IsNullOrWhiteSpace(hello.ReceiverName) ? Host : hello.ReceiverName;
+        var changed = !TrustConfirmed
+            || ReceiverId != hello.ReceiverId
+            || ReceiverName != receiverName
+            || !string.IsNullOrEmpty(ProtectedPairingToken);
+        ReceiverId = hello.ReceiverId;
+        ReceiverName = receiverName;
+        TrustConfirmed = true;
+        PairingToken = "";
+        return changed;
+    }
+
+    public Ech0Settings CreatePairingCandidate(string host, int port, string pairingToken)
+    {
+        var candidate = new Ech0Settings
+        {
+            Host = host,
+            Port = port,
+            DeviceName = DeviceName,
+            InputDeviceId = InputDeviceId,
+            SenderId = Guid.NewGuid().ToString("D"),
+            LaunchAtLogin = LaunchAtLogin,
+        };
+        _ = candidate.TrustedSecret;
+        candidate.PairingToken = pairingToken;
+        return candidate;
+    }
+
+    public void ResetAssociation()
+    {
+        Host = "";
+        Port = 48_484;
+        ReceiverId = "";
+        ReceiverName = "";
+        TrustConfirmed = false;
+        PairingToken = "";
+        SenderId = Guid.NewGuid().ToString("D");
+        ProtectedTrustedSecret = "";
+        _ = TrustedSecret;
+    }
+
+    public void MarkPairingRequired()
+    {
+        TrustConfirmed = false;
+        PairingToken = "";
     }
 }
 

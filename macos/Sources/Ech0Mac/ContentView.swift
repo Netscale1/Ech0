@@ -153,13 +153,17 @@ struct ContentView: View {
     private var pairingScreen: some View {
         HStack(alignment: .top, spacing: 0) {
             VStack(alignment: .leading, spacing: 22) {
-                Text("Pair this Mac")
+                Text("Pair a new device")
                     .font(.title2.weight(.semibold))
+
+                Text("The code is only needed once. Trusted devices reconnect without it.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
 
                 labeledValue("Host", "\(model.host):\(model.port)", monospaced: true)
 
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    labeledValue("Code", model.pairingCode, monospaced: true)
+                    labeledValue("Code for a new device", model.pairingCode, monospaced: true)
                     Button {
                         copyToPasteboard(model.pairingCode)
                     } label: {
@@ -421,9 +425,13 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(device.deviceName)
                     .fontWeight(.medium)
-                Text("Last seen \(device.lastSeenAt.formatted(date: .abbreviated, time: .shortened))")
+                Text(
+                    model.connectedSenderId == device.id
+                        ? "Connected now"
+                        : "Last seen \(device.lastSeenAt.formatted(date: .abbreviated, time: .shortened))"
+                )
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(model.connectedSenderId == device.id ? Color.green : Color.secondary)
             }
             Spacer()
             Button("Forget") { model.forgetTrustedDevice(device) }

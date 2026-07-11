@@ -4,6 +4,9 @@ namespace Ech0.Windows;
 
 internal sealed class SettingsForm : Form
 {
+    private readonly Ech0Settings settings;
+    private readonly AgentState currentState;
+    private readonly Func<Task> suspendConnection;
     private readonly TextBox host = new() { Dock = DockStyle.Fill };
     private readonly NumericUpDown port = new() { Minimum = 1, Maximum = 65_535, Value = 48_484, Dock = DockStyle.Fill };
     private readonly TextBox token = new() { MaxLength = 6, Dock = DockStyle.Fill };
@@ -11,10 +14,15 @@ internal sealed class SettingsForm : Form
     private readonly ComboBox inputDevice = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     private readonly Label discoveryStatus = new() { Text = "", AutoSize = true };
     private readonly Button discover = new() { Text = "Find Mac automatically", AutoSize = true };
-    private readonly Button save = new() { Text = "Save and connect", AutoSize = true };
+    private readonly Button pair = new() { Text = "Pair", AutoSize = true };
+    private bool changingMac;
 
-    public SettingsForm(Ech0Settings settings)
+    public SettingsForm(Ech0Settings settings, AgentState currentState, Func<Task> suspendConnection)
     {
+        this.settings = settings;
+        this.currentState = currentState;
+        this.suspendConnection = suspendConnection;
+
         Text = "Ech0 Windows Settings";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -22,47 +30,182 @@ internal sealed class SettingsForm : Form
         MinimizeBox = false;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(16);
+        Padding = new Padding(18);
 
-        host.Text = settings.Host;
-        port.Value = Math.Clamp(settings.Port, 1, 65_535);
-        token.Text = settings.PairingToken;
         launchAtLogin.Checked = settings.LaunchAtLogin;
         LoadInputDevices(settings.InputDeviceId);
+        ShowCurrentMode();
+    }
 
-        var layout = new TableLayoutPanel
+    private void ShowCurrentMode()
+    {
+        Controls.Clear();
+        if (settings.PairingState == PairingState.Trusted && !changingMac)
         {
+            Controls.Add(BuildTrustedPanel());
+        }
+        else
+        {
+            Controls.Add(BuildPairingPanel());
+        }
+    }
+
+    private Control BuildTrustedPanel()
+    {
+        var layout = CreateLayout();
+        var connected = currentState is AgentState.Idle
+            or AgentState.Capturing
+            or AgentState.Paused
+            or AgentState.DemandWaitingForDevice;
+        var status = connected ? "Connected · Trusted" : "Trusted · not reachable";
+        AddRow(layout, "Mac", new Label { Text = settings.ReceiverName, AutoSize = true });
+        AddRow(layout, "Status", new Label { Text = status, AutoSize = true });
+        AddRow(layout, "Address", new Label { Text = $"{settings.Host}:{settings.Port}", AutoSize = true });
+        AddRow(layout, "Receiver ID", new Label { Text = Abbreviate(settings.ReceiverId), AutoSize = true });
+        AddRow(layout, "Windows microphone", inputDevice);
+        layout.Controls.Add(launchAtLogin, 1, layout.RowCount++);
+
+        var actions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+        var save = new Button { Text = "Save", AutoSize = true };
+        var change = new Button { Text = "Change Mac…", AutoSize = true };
+        var reset = new Button { Text = "Reset pairing…", AutoSize = true };
+        save.Click += (_, _) => SaveTrustedPreferences();
+        change.Click += async (_, _) => await BeginChangeMacAsync();
+        reset.Click += async (_, _) => await ResetPairingAsync();
+        actions.Controls.Add(save);
+        actions.Controls.Add(change);
+        actions.Controls.Add(reset);
+        layout.Controls.Add(actions, 1, layout.RowCount++);
+        return layout;
+    }
+
+    private Control BuildPairingPanel()
+    {
+        host.Text = changingMac ? "" : settings.Host;
+        port.Value = changingMac ? 48_484 : Math.Clamp(settings.Port, 1, 65_535);
+        token.Text = "";
+        discoveryStatus.Text = changingMac
+            ? "The current trusted Mac remains saved until the new pairing succeeds."
+            : "The six-digit code is only used for this first pairing.";
+
+        var layout = CreateLayout();
+        var title = new Label
+        {
+            Text = changingMac ? "Pair a different Mac" : "Pair this Windows PC",
+            Font = new Font(Font, FontStyle.Bold),
             AutoSize = true,
-            ColumnCount = 2,
-            Dock = DockStyle.Fill,
         };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300));
+        layout.Controls.Add(title, 0, layout.RowCount);
+        layout.SetColumnSpan(title, 2);
+        layout.RowCount++;
         AddRow(layout, "Mac host", host);
         AddRow(layout, "Port", port);
-        AddRow(layout, "Pairing code", token);
+        AddRow(layout, "Code for a new device", token);
         AddRow(layout, "Windows microphone", inputDevice);
-        layout.Controls.Add(discover, 1, 4);
-        layout.Controls.Add(discoveryStatus, 1, 5);
-        layout.Controls.Add(launchAtLogin, 1, 6);
-        layout.Controls.Add(save, 1, 7);
-        Controls.Add(layout);
+        layout.Controls.Add(discover, 1, layout.RowCount++);
+        layout.Controls.Add(discoveryStatus, 1, layout.RowCount++);
+        layout.Controls.Add(launchAtLogin, 1, layout.RowCount++);
 
-        discover.Click += async (_, _) => await DiscoverAsync();
-        save.Click += (_, _) => Save(settings);
-        Shown += async (_, _) =>
+        var actions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight };
+        pair.Click -= PairClick;
+        pair.Click += PairClick;
+        actions.Controls.Add(pair);
+        if (changingMac)
         {
-            if (string.IsNullOrWhiteSpace(host.Text))
+            var cancel = new Button { Text = "Cancel", AutoSize = true };
+            cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
+            actions.Controls.Add(cancel);
+        }
+        layout.Controls.Add(actions, 1, layout.RowCount++);
+
+        discover.Click -= DiscoverClick;
+        discover.Click += DiscoverClick;
+        Shown -= DiscoverWhenEmpty;
+        Shown += DiscoverWhenEmpty;
+        return layout;
+    }
+
+    private async void PairClick(object? sender, EventArgs eventArgs) => await PairAsync();
+    private async void DiscoverClick(object? sender, EventArgs eventArgs) => await DiscoverAsync();
+    private async void DiscoverWhenEmpty(object? sender, EventArgs eventArgs)
+    {
+        if (string.IsNullOrWhiteSpace(host.Text))
+        {
+            await DiscoverAsync();
+        }
+    }
+
+    private async Task BeginChangeMacAsync()
+    {
+        await suspendConnection();
+        changingMac = true;
+        ShowCurrentMode();
+    }
+
+    private async Task ResetPairingAsync()
+    {
+        var answer = MessageBox.Show(
+            this,
+            "This removes the trusted relationship from this PC. You will need the current code shown on the Mac to pair again.",
+            "Reset Ech0 pairing",
+            MessageBoxButtons.OKCancel,
+            MessageBoxIcon.Warning);
+        if (answer != DialogResult.OK)
+        {
+            return;
+        }
+
+        await suspendConnection();
+        settings.ResetAssociation();
+        SettingsStore.Save(settings);
+        changingMac = false;
+        ShowCurrentMode();
+    }
+
+    private async Task PairAsync()
+    {
+        if (string.IsNullOrWhiteSpace(host.Text) || token.Text.Length != 6 || !token.Text.All(char.IsDigit))
+        {
+            MessageBox.Show(this, "Enter a Mac host and its current six-digit code.", "Ech0", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        pair.Enabled = false;
+        discover.Enabled = false;
+        discoveryStatus.Text = "Pairing securely on the local network…";
+        await suspendConnection();
+
+        var candidate = settings.CreatePairingCandidate(host.Text.Trim(), (int)port.Value, token.Text);
+        candidate.InputDeviceId = SelectedInputDeviceId();
+        candidate.LaunchAtLogin = launchAtLogin.Checked;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var hello = await PairingProbe.PairAsync(candidate, timeout.Token);
+            if (!candidate.TryCompleteTrust(hello))
             {
-                await DiscoverAsync();
+                throw new InvalidOperationException("The Mac did not confirm the trusted relationship.");
             }
-        };
+            SettingsStore.Save(candidate);
+            AutoStartManager.Configure(candidate.LaunchAtLogin);
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+        catch (Exception exception)
+        {
+            Log.Write("pairing_failed", exception.GetType().Name);
+            discoveryStatus.Text = exception is PairingRequiredException
+                ? "The code was rejected. Generate or copy the current code from the Mac."
+                : $"Pairing failed: {exception.GetType().Name}";
+            pair.Enabled = true;
+            discover.Enabled = true;
+        }
     }
 
     private async Task DiscoverAsync()
     {
         discover.Enabled = false;
-        discoveryStatus.Text = "Searching on the local network...";
+        discoveryStatus.Text = "Searching on the local network…";
         try
         {
             var result = await DnsSdDiscovery.FindFirstAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
@@ -85,22 +228,25 @@ internal sealed class SettingsForm : Form
         }
     }
 
-    private void Save(Ech0Settings settings)
+    private void SaveTrustedPreferences()
     {
-        if (string.IsNullOrWhiteSpace(host.Text) || token.Text.Length != 6 || !token.Text.All(char.IsDigit))
-        {
-            MessageBox.Show(this, "Enter a Mac host and the six-digit pairing code.", "Ech0", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-        settings.Host = host.Text.Trim();
-        settings.Port = (int)port.Value;
-        settings.PairingToken = token.Text;
+        settings.InputDeviceId = SelectedInputDeviceId();
         settings.LaunchAtLogin = launchAtLogin.Checked;
-        settings.InputDeviceId = (inputDevice.SelectedItem as InputDeviceChoice)?.Id ?? "";
         SettingsStore.Save(settings);
         AutoStartManager.Configure(settings.LaunchAtLogin);
         DialogResult = DialogResult.OK;
         Close();
+    }
+
+    private string SelectedInputDeviceId()
+        => (inputDevice.SelectedItem as InputDeviceChoice)?.Id ?? "";
+
+    private static TableLayoutPanel CreateLayout()
+    {
+        var layout = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, Dock = DockStyle.Fill };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 320));
+        return layout;
     }
 
     private static void AddRow(TableLayoutPanel layout, string label, Control control)
@@ -110,8 +256,12 @@ internal sealed class SettingsForm : Form
         layout.Controls.Add(control, 1, row);
     }
 
+    private static string Abbreviate(string value)
+        => value.Length <= 12 ? value : $"{value[..8]}…{value[^4..]}";
+
     private void LoadInputDevices(string selectedId)
     {
+        inputDevice.Items.Clear();
         inputDevice.Items.Add(new InputDeviceChoice("", "Windows default input"));
         try
         {
@@ -125,9 +275,7 @@ internal sealed class SettingsForm : Form
         {
             Log.Write("device_enumeration_failed", exception.GetType().Name);
         }
-        var selected = inputDevice.Items
-            .Cast<InputDeviceChoice>()
-            .FirstOrDefault(choice => choice.Id == selectedId);
+        var selected = inputDevice.Items.Cast<InputDeviceChoice>().FirstOrDefault(choice => choice.Id == selectedId);
         inputDevice.SelectedItem = selected ?? inputDevice.Items[0];
     }
 

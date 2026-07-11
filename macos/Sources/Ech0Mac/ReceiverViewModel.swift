@@ -26,6 +26,7 @@ final class ReceiverViewModel: ObservableObject {
     @Published var pairingCode = PairingCode.generate()
     @Published private(set) var qrImage: NSImage?
     @Published private(set) var trustedDevices: [TrustedDevice] = []
+    @Published private(set) var connectedSenderId: String?
     @Published private(set) var inputConsumers: [String] = []
     @Published private(set) var remoteCaptureState = "idle"
     @Published private(set) var codexShortcutCaptureActive = false
@@ -42,10 +43,16 @@ final class ReceiverViewModel: ObservableObject {
 
     private let audioEngine = AudioOutputEngine()
     private let trustedDeviceStore = TrustedDeviceStore()
+    private let receiverIdentity = ReceiverIdentityStore().loadOrCreate()
     private let inputDemandMonitor = AudioInputDemandMonitor()
     private let codexAccessibilityMonitor = CodexDictationAccessibilityMonitor()
     private let codexShortcutMonitor = CodexDictationShortcutMonitor()
-    private lazy var server = ReceiverServer(port: port, token: pairingCode)
+    private lazy var server = ReceiverServer(
+        port: port,
+        token: pairingCode,
+        receiverId: receiverIdentity.id,
+        receiverName: Host.current().localizedName ?? "Ech0 Mac"
+    )
     private var metricsTimer: Timer?
 
     init() {
@@ -123,7 +130,7 @@ final class ReceiverViewModel: ObservableObject {
         pairingCode = PairingCode.generate()
         refreshPairingAssets()
         server.updateToken(pairingCode)
-        appendLog("Generated new pairing code \(pairingCode).")
+        appendLog("Generated a new pairing code.")
     }
 
     func setBlackHoleAsSystemInput() {
@@ -140,6 +147,7 @@ final class ReceiverViewModel: ObservableObject {
 
     func forgetTrustedDevice(_ device: TrustedDevice) {
         guard trustedDeviceStore.forget(id: device.id) else { return }
+        server.revokeTrustedSender(id: device.id)
         refreshTrustedDevices()
         appendLog("Forgot trusted device \(device.deviceName).")
     }
@@ -225,13 +233,13 @@ final class ReceiverViewModel: ObservableObject {
         }
 
         server.trustSenderFromPairing = { [weak self] hello in
-            guard let self else { return }
+            guard let self else { return false }
             guard let update = self.trustedDeviceStore.trust(
                 senderId: hello.senderId,
                 deviceName: hello.deviceName,
                 trustedSecret: hello.trustedSecret
             ) else {
-                return
+                return false
             }
             DispatchQueue.main.async {
                 self.refreshTrustedDevices()
@@ -241,6 +249,7 @@ final class ReceiverViewModel: ObservableObject {
                 let action = update.wasNew ? "Remembered" : "Updated"
                 self.appendLog("\(action) trusted device \(update.device.deviceName).")
             }
+            return true
         }
 
         server.onAudioFrame = { [weak self] frame in
@@ -348,12 +357,14 @@ final class ReceiverViewModel: ObservableObject {
         case .idle:
             connectionLabel = "Idle"
             clientName = nil
+            connectedSenderId = nil
             audioEngine.stop()
             metrics = ReceiverMetrics()
 
         case .listening:
             connectionLabel = "Waiting for sender"
             clientName = nil
+            connectedSenderId = nil
             audioEngine.stop()
             do {
                 try audioEngine.prepare(deviceNamed: blackHoleDeviceName)
@@ -364,10 +375,12 @@ final class ReceiverViewModel: ObservableObject {
         case .handshaking:
             connectionLabel = "Validating sender"
             clientName = nil
+            connectedSenderId = nil
 
-        case .connected(let deviceName):
+        case .connected(let deviceName, let senderId):
             connectionLabel = remoteCaptureState == "capturing" ? "Streaming" : "Connected"
             clientName = deviceName
+            connectedSenderId = senderId
         }
     }
 

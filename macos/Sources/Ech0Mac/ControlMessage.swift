@@ -24,6 +24,10 @@ struct ServerHello: Codable {
     let targetBufferMs: Int
     let negotiatedProtocolVersion: Int?
     let capabilities: [String]?
+    let receiverId: String?
+    let receiverName: String?
+    let authentication: String?
+    let trustEstablished: Bool?
 }
 
 struct CaptureDemand: Codable {

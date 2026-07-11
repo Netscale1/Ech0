@@ -16,6 +16,7 @@ internal sealed class AgentApplicationContext : ApplicationContext
     private Ech0Settings settings;
     private ConnectionWorker? worker;
     private bool paused;
+    private AgentState currentState = AgentState.Disconnected;
 
     public AgentApplicationContext()
     {
@@ -50,17 +51,29 @@ internal sealed class AgentApplicationContext : ApplicationContext
 
     private void ShowSettings()
     {
-        using var form = new SettingsForm(settings);
+        using var form = new SettingsForm(settings, currentState, StopWorkerAsync);
         if (form.ShowDialog() != DialogResult.OK)
         {
+            settings = SettingsStore.Load();
             if (!settings.IsConfigured)
             {
-                SetState(AgentState.Disconnected, "Setup required");
+                SetState(AgentState.PairingRequired, null);
+            }
+            else if (worker is null)
+            {
+                StartWorker();
             }
             return;
         }
         settings = SettingsStore.Load();
-        StartWorker();
+        if (settings.IsConfigured)
+        {
+            StartWorker();
+        }
+        else
+        {
+            SetState(AgentState.PairingRequired, null);
+        }
     }
 
     private async void StartWorker()
@@ -94,9 +107,12 @@ internal sealed class AgentApplicationContext : ApplicationContext
 
     private void SetState(AgentState state, string? detail)
     {
+        var previousState = currentState;
+        currentState = state;
         var label = state switch
         {
             AgentState.Connecting => "Connecting",
+            AgentState.PairingRequired => "Pairing required",
             AgentState.Idle => "Connected — waiting for BlackHole",
             AgentState.DemandWaitingForDevice => "Microphone unavailable",
             AgentState.Capturing => "Transmitting microphone",
@@ -111,10 +127,18 @@ internal sealed class AgentApplicationContext : ApplicationContext
         {
             AgentState.Capturing => capturingIcon,
             AgentState.DemandWaitingForDevice => unavailableIcon,
+            AgentState.PairingRequired => unavailableIcon,
             AgentState.Idle or AgentState.Paused => waitingIcon,
             _ => disconnectedIcon,
         };
         tray.Text = $"Ech0: {label}"[..Math.Min(63, $"Ech0: {label}".Length)];
+        if (state == AgentState.PairingRequired && previousState != AgentState.PairingRequired)
+        {
+            tray.BalloonTipTitle = "Ech0 pairing required";
+            tray.BalloonTipText = "Open Ech0 Settings and enter the current code shown on the Mac.";
+            tray.BalloonTipIcon = ToolTipIcon.Warning;
+            tray.ShowBalloonTip(5_000);
+        }
     }
 
     private void TogglePause()

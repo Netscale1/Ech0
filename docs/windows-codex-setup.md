@@ -33,7 +33,7 @@ Lo script crea il bundle in `dist/macos/Ech0Mac.app`. Se nel portachiavi esiste 
 
 Al primo avvio:
 
-1. Aprire **Pairing** e annotare il codice a sei cifre e l’indirizzo del Mac.
+1. Aprire **Pairing** e annotare il codice a sei cifre per il nuovo dispositivo e l’indirizzo del Mac.
 2. Abilitare **Launch at login** se Ech0Mac deve partire con macOS.
 3. Consentire Ech0Mac in **Impostazioni di Sistema → Privacy e sicurezza → Accessibilità**.
 4. Se macOS non aggiorna subito il permesso, chiudere e riaprire Ech0Mac.
@@ -75,7 +75,11 @@ Ech0Mac pubblica il servizio DNS-SD `_ech0._tcp.local`. Ech0Windows prova prima 
 - porta `48484`;
 - codice di pairing a sei cifre.
 
-Dopo il pairing, Windows genera un `senderId` persistente e un segreto casuale. Il segreto è protetto con DPAPI `CurrentUser` su Windows; sul Mac viene conservato soltanto l’hash. Un dispositivo già fidato può riconnettersi senza inserire nuovamente il codice.
+Dopo il pairing, Windows conserva il `receiverId` stabile del Mac, un `senderId` e un segreto casuale. Segreto e codice eventualmente pendente vengono serializzati soltanto nei rispettivi campi protetti con DPAPI `CurrentUser`; sul Mac viene conservato soltanto l’hash del segreto. Il codice viene eliminato da Windows dopo la conferma e non deve corrispondere a quello mostrato in seguito dal Mac: un dispositivo trusted si riconnette usando la propria identità. Il primo salvataggio con la versione aggiornata rimuove anche eventuali proprietà credenziali in chiaro create dalle versioni precedenti.
+
+Nelle impostazioni Windows, un Mac associato appare come `Connected · Trusted` oppure `Trusted · not reachable`; il campo del codice compare soltanto quando serve un nuovo pairing. **Change Mac** conserva l’associazione precedente finché il nuovo Mac non conferma la fiducia. **Reset pairing** elimina invece subito l’associazione locale.
+
+Se il Mac dimentica SE7EN, la sessione viene chiusa immediatamente. Windows ferma il microfono e i retry, mostra `Pairing required` nella tray e una notifica. Aprire le impostazioni e inserire il codice corrente del Mac per autorizzare nuove credenziali.
 
 Windows invia un heartbeat ogni secondo. Se un crash, una sospensione o un cambio rete lascia una socket incompleta, Ech0Mac libera automaticamente lo slot sender dopo 5 secondi e consente la riconnessione successiva.
 
@@ -136,6 +140,10 @@ Verificare che Codex usi `BlackHole 2ch` come ingresso e che l’app abbia il pe
 ### Nessuna discovery Windows
 
 Verificare che Mac e PC siano sulla stessa LAN, consentire Ech0Windows nel firewall privato Windows e usare l’inserimento manuale dell’IP del Mac e della porta `48484`.
+
+### Il codice Windows è diverso da quello del Mac
+
+Dopo il primo pairing Windows non deve mostrare alcun codice: il codice del Mac serve soltanto ai nuovi dispositivi. Se Windows mostra `Pairing required`, usare il codice corrente visibile sul Mac. Non copiare o sincronizzare manualmente codici per un dispositivo che appare già `Trusted`.
 
 ## Limiti intenzionali
 

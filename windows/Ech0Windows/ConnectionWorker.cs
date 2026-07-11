@@ -6,6 +6,7 @@ namespace Ech0.Windows;
 internal enum AgentState
 {
     Disconnected,
+    PairingRequired,
     Connecting,
     Idle,
     DemandWaitingForDevice,
@@ -59,6 +60,14 @@ internal sealed class ConnectionWorker : IAsyncDisposable
             {
                 break;
             }
+            catch (PairingRequiredException exception)
+            {
+                Log.Write("pairing_required", exception.Message);
+                settings.MarkPairingRequired();
+                SettingsStore.Save(settings);
+                StateChanged?.Invoke(AgentState.PairingRequired, null);
+                return;
+            }
             catch (Exception exception)
             {
                 Log.Write("connection_failed", exception.GetType().Name);
@@ -93,35 +102,11 @@ internal sealed class ConnectionWorker : IAsyncDisposable
         stream = client.GetStream();
         lastPongTimestamp = Stopwatch.GetTimestamp();
 
-        await WriteControlAsync(
-            new ClientHello(
-                "clientHello",
-                2,
-                settings.PairingToken,
-                settings.DeviceName,
-                settings.SenderId,
-                settings.TrustedSecret,
-                ["remoteCaptureControl"],
-                48_000,
-                1,
-                20),
-            cancellationToken);
-
-        var responsePacket = await Ech0Protocol.ReadPacketAsync(stream, cancellationToken);
-        if (responsePacket.Type != Ech0Protocol.ControlType
-            || Ech0Protocol.ReadKind(responsePacket.Payload) != "serverHello")
+        var hello = await ConnectionHandshake.ConnectAndAuthenticateAsync(stream, settings, cancellationToken);
+        if (settings.TryCompleteTrust(hello))
         {
-            throw new InvalidDataException("Expected serverHello.");
-        }
-        var hello = Ech0Protocol.DecodeControl<ServerHello>(responsePacket.Payload);
-        if (!hello.Accepted)
-        {
-            throw new InvalidOperationException(hello.Reason ?? "Pairing rejected.");
-        }
-        if (hello.NegotiatedProtocolVersion != 2
-            || hello.Capabilities?.Contains("remoteCaptureControl") != true)
-        {
-            throw new InvalidOperationException("Mac receiver does not support remote capture control.");
+            SettingsStore.Save(settings);
+            Log.Write("trust_confirmed", hello.Authentication ?? "unknown");
         }
 
         Log.Write("connected", settings.Host);
@@ -174,6 +159,10 @@ internal sealed class ConnectionWorker : IAsyncDisposable
                     break;
                 case "stop":
                     var stopMessage = Ech0Protocol.DecodeControl<StopMessage>(packet.Payload);
+                    if (stopMessage.Reason is "trustRevoked" or "pairingRequired")
+                    {
+                        throw new PairingRequiredException(stopMessage.Reason);
+                    }
                     throw new InvalidOperationException($"Mac stopped the session: {stopMessage.Reason}");
             }
         }

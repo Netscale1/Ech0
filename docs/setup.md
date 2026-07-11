@@ -22,8 +22,9 @@ For the complete Windows-to-Mac Codex workflow, see [Windows → Mac Codex setup
 2. Keep the Mac and PC on the same trusted LAN.
 3. Use automatic discovery or enter the Mac address and port `48484`.
 4. Enter the pairing code shown in Ech0Mac.
-5. Ech0 installs no driver and requires no administrator rights. When enabled, launch-at-login is registered for the current user under the standard Windows Run key.
-6. The default Windows capture endpoint is opened only while a Mac app uses BlackHole. If the wireless headset is off, Ech0 waits instead of silently switching microphones.
+5. After trust is confirmed, Windows deletes the one-time code and reconnects using the saved receiver and sender identities.
+6. Ech0 installs no driver and requires no administrator rights. When enabled, launch-at-login is registered for the current user under the standard Windows Run key.
+7. The default Windows capture endpoint is opened only while a Mac app uses BlackHole. If the wireless headset is off, Ech0 waits instead of silently switching microphones.
 
 ## Networking
 

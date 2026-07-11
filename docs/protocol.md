@@ -42,11 +42,17 @@ Control messages are JSON objects with a required `kind` field.
   "reason": null,
   "targetBufferMs": 60,
   "negotiatedProtocolVersion": 2,
-  "capabilities": ["remoteCaptureControl"]
+  "capabilities": ["remoteCaptureControl"],
+  "receiverId": "a0ab3c21-16a5-41be-95c5-95f242f6a5cc",
+  "receiverName": "Mac mini",
+  "authentication": "trusted",
+  "trustEstablished": true
 }
 ```
 
 Version 1 remains sender-driven for Android. A version 2 sender includes `senderId`, `trustedSecret`, and `capabilities: ["remoteCaptureControl"]` in `clientHello`. The server sends the v2 messages below only after negotiating that capability.
+
+The six-digit token is a bootstrap credential for a new device, not persistent shared state. On first pairing the Mac stores only a hash of `trustedSecret` and replies with `authentication: "pairing"` and `trustEstablished: true`. Later connections may omit the token and authenticate with the trusted sender identity. `receiverId` is stable across Mac app restarts; all added `serverHello` fields are optional for compatibility with older implementations.
 
 ### `captureDemand`
 
@@ -96,9 +102,11 @@ Valid states are `idle`, `starting`, `capturing`, `paused`, and `error`.
 ```json
 {
   "kind": "stop",
-  "reason": "invalidToken"
+  "reason": "trustRevoked"
 }
 ```
+
+For v2, `pairingRequired` means that neither the trusted identity nor the current bootstrap code was accepted. `trustRevoked` immediately terminates an active trusted session. Version 1 retains the legacy `invalidToken` rejection.
 
 ## Audio Frame Payload
 
@@ -138,7 +146,9 @@ The QR code and manual pairing data use the same JSON payload:
 
 - The server accepts a single active sender.
 - The sender must send `clientHello` before any audio frames.
-- If the token is invalid, the server replies with `serverHello.accepted = false` and closes the session.
+- A v2 trusted sender reconnects with `senderId` and `trustedSecret`; the pairing token may be empty.
+- If neither trust nor the token is valid, the server replies with `serverHello.accepted = false` and closes the session.
+- Revoking the active sender sends `stop(reason: "trustRevoked")` before closing the connection.
 - An active sender sends `ping` once per second and may compute round-trip time from the echoed `pong`.
 - The receiver releases a connection that does not complete its handshake or send a heartbeat for more than 5 seconds, allowing a reconnect without restarting Ech0Mac.
 - A `stop` packet is terminal and should be followed by closing the TCP connection.

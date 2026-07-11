@@ -9,7 +9,11 @@ final class ProtocolCodecTests: XCTestCase {
                 reason: nil,
                 targetBufferMs: 60,
                 negotiatedProtocolVersion: 2,
-                capabilities: ["remoteCaptureControl"]
+                capabilities: ["remoteCaptureControl"],
+                receiverId: "receiver-1",
+                receiverName: "Mac mini",
+                authentication: "trusted",
+                trustEstablished: true
             )
         )
 
@@ -22,6 +26,9 @@ final class ProtocolCodecTests: XCTestCase {
 
         XCTAssertTrue(value.accepted)
         XCTAssertEqual(value.targetBufferMs, 60)
+        XCTAssertEqual(value.receiverId, "receiver-1")
+        XCTAssertEqual(value.authentication, "trusted")
+        XCTAssertEqual(value.trustEstablished, true)
     }
 
     func testClientHelloRoundTripWithTrustedFields() throws {

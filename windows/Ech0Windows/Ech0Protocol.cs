@@ -115,7 +115,11 @@ internal sealed record ServerHello(
     string? Reason,
     int TargetBufferMs,
     int? NegotiatedProtocolVersion,
-    string[]? Capabilities);
+    string[]? Capabilities,
+    string? ReceiverId,
+    string? ReceiverName,
+    string? Authentication,
+    bool? TrustEstablished);
 
 internal sealed record CaptureDemand(string Kind, bool Active, ulong Generation);
 internal sealed record CaptureStatus(string Kind, ulong Generation, string State, string? ErrorCode);

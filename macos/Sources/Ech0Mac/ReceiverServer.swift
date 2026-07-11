@@ -1,6 +1,26 @@
 import Foundation
 import Network
 
+struct ReceiverAuthenticationDecision: Equatable {
+    let accepted: Bool
+    let authentication: String?
+    let rejectionReason: String?
+
+    static func evaluate(protocolVersion: Int, tokenMatches: Bool, trustedIdentityMatches: Bool) -> Self {
+        if trustedIdentityMatches {
+            return Self(accepted: true, authentication: "trusted", rejectionReason: nil)
+        }
+        if tokenMatches {
+            return Self(accepted: true, authentication: "pairing", rejectionReason: nil)
+        }
+        return Self(
+            accepted: false,
+            authentication: nil,
+            rejectionReason: protocolVersion >= 2 ? "pairingRequired" : "invalidToken"
+        )
+    }
+}
+
 struct ReceiverConnectionLiveness {
     static func timeoutReason(
         didHandshake: Bool,
@@ -23,13 +43,14 @@ final class ReceiverServer {
         case idle
         case listening(port: UInt16)
         case handshaking
-        case connected(deviceName: String)
+        case connected(deviceName: String, senderId: String?)
     }
 
     private final class ConnectionContext {
         let acceptedAt = ProcessInfo.processInfo.systemUptime
         var didHandshake = false
         var deviceName = ""
+        var senderId: String?
         var protocolVersion = 1
         var supportsRemoteCaptureControl = false
         var lastPingAt: TimeInterval?
@@ -39,13 +60,15 @@ final class ReceiverServer {
     var onLog: ((String) -> Void)?
     var onStateChange: ((ConnectionState) -> Void)?
     var authenticateTrustedSender: ((ClientHello) -> Bool)?
-    var trustSenderFromPairing: ((ClientHello) -> Void)?
+    var trustSenderFromPairing: ((ClientHello) -> Bool)?
     var onCaptureStatus: ((CaptureStatus) -> Void)?
 
     private let queue = DispatchQueue(label: "net.ech0.receiver.server")
     private let targetBufferMs: Int
     private let connectionTimeout: TimeInterval
     private let port: UInt16
+    private let receiverId: String
+    private let receiverName: String
     private var expectedToken: String
     private var listener: NWListener?
     private var livenessTimer: DispatchSourceTimer?
@@ -57,11 +80,15 @@ final class ReceiverServer {
     init(
         port: UInt16 = 48_484,
         token: String,
+        receiverId: String,
+        receiverName: String,
         targetBufferMs: Int = 60,
         connectionTimeout: TimeInterval = 5
     ) {
         self.port = port
         self.expectedToken = token
+        self.receiverId = receiverId
+        self.receiverName = receiverName
         self.targetBufferMs = targetBufferMs
         self.connectionTimeout = connectionTimeout
     }
@@ -69,6 +96,21 @@ final class ReceiverServer {
     func updateToken(_ token: String) {
         queue.async {
             self.expectedToken = token
+        }
+    }
+
+    func revokeTrustedSender(id: String) {
+        queue.async {
+            guard
+                let connection = self.activeConnection,
+                let context = self.activeContext,
+                context.senderId == id
+            else { return }
+
+            self.sendControl(.stop(StopMessage(reason: "trustRevoked")), on: connection)
+            self.queue.asyncAfter(deadline: .now() + 0.1) {
+                self.handleDisconnect(connection: connection, reason: "trustRevoked")
+            }
         }
     }
 
@@ -265,8 +307,13 @@ final class ReceiverServer {
             }
             let acceptedByToken = hello.token == expectedToken
             let acceptedByTrustedIdentity = authenticateTrustedSender?(hello) ?? false
-            guard acceptedByToken || acceptedByTrustedIdentity else {
-                reject(connection: connection, reason: "invalidToken")
+            let authenticationDecision = ReceiverAuthenticationDecision.evaluate(
+                protocolVersion: hello.protocolVersion,
+                tokenMatches: acceptedByToken,
+                trustedIdentityMatches: acceptedByTrustedIdentity
+            )
+            guard authenticationDecision.accepted else {
+                reject(connection: connection, reason: authenticationDecision.rejectionReason ?? "invalidToken")
                 return
             }
             guard hello.sampleRate == 48_000, hello.channels == 1, hello.frameMs == 20 else {
@@ -277,12 +324,13 @@ final class ReceiverServer {
             context.didHandshake = true
             context.lastPingAt = ProcessInfo.processInfo.systemUptime
             context.deviceName = hello.deviceName
+            context.senderId = hello.senderId
             context.protocolVersion = hello.protocolVersion
             context.supportsRemoteCaptureControl = hello.protocolVersion >= 2
                 && (hello.capabilities ?? []).contains("remoteCaptureControl")
-            if acceptedByToken {
-                trustSenderFromPairing?(hello)
-            }
+            let trustEstablished = acceptedByTrustedIdentity
+                || (acceptedByToken && (trustSenderFromPairing?(hello) ?? false))
+            let authentication = authenticationDecision.authentication ?? "pairing"
             sendControl(
                 .serverHello(
                     ServerHello(
@@ -290,14 +338,18 @@ final class ReceiverServer {
                         reason: nil,
                         targetBufferMs: targetBufferMs,
                         negotiatedProtocolVersion: hello.protocolVersion,
-                        capabilities: context.supportsRemoteCaptureControl ? ["remoteCaptureControl"] : []
+                        capabilities: context.supportsRemoteCaptureControl ? ["remoteCaptureControl"] : [],
+                        receiverId: hello.protocolVersion >= 2 ? receiverId : nil,
+                        receiverName: hello.protocolVersion >= 2 ? receiverName : nil,
+                        authentication: hello.protocolVersion >= 2 ? authentication : nil,
+                        trustEstablished: hello.protocolVersion >= 2 ? trustEstablished : nil
                     )
                 ),
                 on: connection
             )
-            let authMode = acceptedByTrustedIdentity && !acceptedByToken ? "trusted device" : "pairing token"
+            let authMode = acceptedByTrustedIdentity ? "trusted device" : "pairing token"
             onLog?("Accepted sender \(hello.deviceName) via \(authMode).")
-            onStateChange?(.connected(deviceName: hello.deviceName))
+            onStateChange?(.connected(deviceName: hello.deviceName, senderId: hello.senderId))
             sendCurrentCaptureDemandIfSupported(on: connection, context: context)
 
         case .ping(let ping):
@@ -325,7 +377,11 @@ final class ReceiverServer {
                         reason: reason,
                         targetBufferMs: targetBufferMs,
                         negotiatedProtocolVersion: nil,
-                        capabilities: nil
+                        capabilities: nil,
+                        receiverId: nil,
+                        receiverName: nil,
+                        authentication: nil,
+                        trustEstablished: nil
                 )
             ),
             on: connection
