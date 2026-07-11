@@ -2,6 +2,16 @@ import XCTest
 @testable import Ech0Mac
 
 final class JitterBufferTests: XCTestCase {
+    func testIdleClockOutputsSilenceWithoutGrowingUnderruns() {
+        let buffer = JitterBuffer()
+
+        let output = buffer.consumeMonoSamples(count: 512)
+
+        XCTAssertEqual(output, Array(repeating: Int16(0), count: 512))
+        XCTAssertEqual(buffer.snapshot().underruns, 0)
+        XCTAssertEqual(buffer.snapshot().targetBufferMs, 60)
+    }
+
     func testConsumesBufferedAudioAfterTargetReached() {
         let buffer = JitterBuffer()
         let samples = Array(repeating: Int16(300), count: 960)

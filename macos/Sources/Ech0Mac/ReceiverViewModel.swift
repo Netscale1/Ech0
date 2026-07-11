@@ -54,6 +54,9 @@ final class ReceiverViewModel: ObservableObject {
         receiverName: Host.current().localizedName ?? "Ech0 Mac"
     )
     private var metricsTimer: Timer?
+    private var captureDemandWasActive = false
+    private var captureDemandStartedAt: TimeInterval?
+    private var loggedFirstFrameForDemand = false
 
     init() {
         bindCallbacks()
@@ -260,6 +263,11 @@ final class ReceiverViewModel: ObservableObject {
             self.audioEngine.enqueue(frame)
             let inputLevel = Self.normalizedAudioLevel(for: frame.samples)
             DispatchQueue.main.async {
+                if !self.loggedFirstFrameForDemand, let startedAt = self.captureDemandStartedAt {
+                    self.loggedFirstFrameForDemand = true
+                    let elapsedMs = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000)
+                    self.appendLog("First Windows audio frame received after \(elapsedMs) ms.")
+                }
                 self.metrics.framesReceived += 1
                 self.metrics.lastSequence = frame.sequence
                 self.metrics.inputLevel = max(inputLevel, self.metrics.inputLevel * 0.7)
@@ -342,8 +350,26 @@ final class ReceiverViewModel: ObservableObject {
     }
 
     private func updateCaptureDemand() {
-        server.updateCaptureDemand(active: isCaptureDemandActive)
-        if !isCaptureDemandActive {
+        let active = isCaptureDemandActive
+        if active != captureDemandWasActive {
+            captureDemandWasActive = active
+            if active {
+                captureDemandStartedAt = ProcessInfo.processInfo.systemUptime
+                loggedFirstFrameForDemand = false
+                do {
+                    try audioEngine.start()
+                } catch {
+                    errorMessage = error.localizedDescription
+                    appendLog("Failed to start BlackHole output: \(error.localizedDescription)")
+                }
+                appendLog("Capture demand sent to Windows.")
+            } else {
+                captureDemandStartedAt = nil
+                loggedFirstFrameForDemand = false
+            }
+        }
+        server.updateCaptureDemand(active: active)
+        if !active {
             audioEngine.suspend()
         }
     }

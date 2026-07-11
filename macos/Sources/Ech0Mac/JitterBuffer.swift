@@ -15,6 +15,7 @@ final class JitterBuffer {
     private var currentFrame: AudioFrame?
     private var currentSampleIndex = 0
     private var isPrimedForPlayback = false
+    private var hasReceivedFrameSinceReset = false
     private var lastSequence: UInt64?
     private var stableReads = 0
 
@@ -32,6 +33,7 @@ final class JitterBuffer {
             currentFrame = nil
             currentSampleIndex = 0
             isPrimedForPlayback = false
+            hasReceivedFrameSinceReset = false
             lastSequence = nil
             stableReads = 0
             targetBufferMs = 60
@@ -49,6 +51,7 @@ final class JitterBuffer {
             }
 
             lastSequence = frame.sequence
+            hasReceivedFrameSinceReset = true
             queuedFrames.append(frame)
 
             while bufferedMsUnlocked() > maxTargetMs, !queuedFrames.isEmpty {
@@ -62,6 +65,7 @@ final class JitterBuffer {
     func consumeMonoSamples(count: Int) -> [Int16] {
         lock.withLock {
             var output = Array(repeating: Int16(0), count: count)
+            guard hasReceivedFrameSinceReset else { return output }
             var filled = 0
 
             while filled < count {

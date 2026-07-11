@@ -39,6 +39,21 @@ struct CodexDictationAccessibilityStateResolver {
             return nil
         }
     }
+
+    static func resolve(buttonDescriptions: [String]) -> CodexDictationAccessibilityState? {
+        var foundInactiveControl = false
+        for description in buttonDescriptions {
+            switch resolve(buttonDescription: description) {
+            case .active:
+                return .active
+            case .inactive:
+                foundInactiveControl = true
+            case .permissionRequired, .unavailable, nil:
+                continue
+            }
+        }
+        return foundInactiveControl ? .inactive : nil
+    }
 }
 
 final class CodexDictationAccessibilityMonitor {
@@ -48,7 +63,7 @@ final class CodexDictationAccessibilityMonitor {
     private let queue = DispatchQueue(label: "net.ech0.codex-dictation-accessibility")
     private var timer: DispatchSourceTimer?
     private var targetPID: pid_t?
-    private var cachedControl: AXUIElement?
+    private var cachedControls: [AXUIElement] = []
     private var currentState: CodexDictationAccessibilityState?
     private var nextFullScanTime: TimeInterval = 0
 
@@ -79,7 +94,7 @@ final class CodexDictationAccessibilityMonitor {
         timer?.cancel()
         timer = nil
         targetPID = nil
-        cachedControl = nil
+        cachedControls = []
     }
 
     deinit {
@@ -103,36 +118,42 @@ final class CodexDictationAccessibilityMonitor {
 
         if targetPID != application.processIdentifier {
             targetPID = application.processIdentifier
-            cachedControl = nil
+            cachedControls = []
             nextFullScanTime = 0
         }
 
-        if let cachedControl,
-           let description = Self.stringAttribute(kAXDescriptionAttribute, from: cachedControl),
-           let state = CodexDictationAccessibilityStateResolver.resolve(
-               buttonDescription: description
-           ) {
-            publish(state)
-            return
+        let now = ProcessInfo.processInfo.systemUptime
+        if now < nextFullScanTime {
+            let descriptions = cachedControls.compactMap {
+                Self.stringAttribute(kAXDescriptionAttribute, from: $0)
+            }
+            if let state = CodexDictationAccessibilityStateResolver.resolve(
+                buttonDescriptions: descriptions
+            ) {
+                publish(state)
+                return
+            }
+            if cachedControls.isEmpty {
+                return
+            }
         }
 
-        cachedControl = nil
-        let now = ProcessInfo.processInfo.systemUptime
-        guard now >= nextFullScanTime else { return }
-
         let appElement = AXUIElementCreateApplication(application.processIdentifier)
-        if let match = Self.findDictationControl(in: appElement) {
-            cachedControl = match.element
-            publish(match.state)
+        let matches = Self.findDictationControls(in: appElement)
+        cachedControls = matches.map(\.element)
+        nextFullScanTime = now + 0.5
+        if let state = CodexDictationAccessibilityStateResolver.resolve(
+            buttonDescriptions: matches.map(\.description)
+        ) {
+            publish(state)
         } else {
-            nextFullScanTime = now + 1
             publish(.unavailable)
         }
     }
 
     private func resetTarget() {
         targetPID = nil
-        cachedControl = nil
+        cachedControls = []
         nextFullScanTime = 0
     }
 
@@ -144,27 +165,28 @@ final class CodexDictationAccessibilityMonitor {
         }
     }
 
-    private static func findDictationControl(
+    private static func findDictationControls(
         in root: AXUIElement
-    ) -> (element: AXUIElement, state: CodexDictationAccessibilityState)? {
+    ) -> [(element: AXUIElement, description: String)] {
         var stack = [root]
         var visitedCount = 0
+        var matches: [(element: AXUIElement, description: String)] = []
 
         while let element = stack.popLast(), visitedCount < 20_000 {
             visitedCount += 1
 
             if stringAttribute(kAXRoleAttribute, from: element) == kAXButtonRole,
                let description = stringAttribute(kAXDescriptionAttribute, from: element),
-               let state = CodexDictationAccessibilityStateResolver.resolve(
+               CodexDictationAccessibilityStateResolver.resolve(
                    buttonDescription: description
-               ) {
-                return (element, state)
+               ) != nil {
+                matches.append((element, description))
             }
 
             stack.append(contentsOf: children(of: element).reversed())
         }
 
-        return nil
+        return matches
     }
 
     private static func children(of element: AXUIElement) -> [AXUIElement] {

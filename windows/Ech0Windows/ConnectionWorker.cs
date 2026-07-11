@@ -28,6 +28,7 @@ internal sealed class ConnectionWorker : IAsyncDisposable
     private long lastPongTimestamp;
     private ulong sequence;
     private Task? runTask;
+    private int lastLoggedAudioSession;
 
     public event Action<AgentState, string?>? StateChanged;
     public string? CurrentDeviceName => capture.DeviceName;
@@ -152,6 +153,7 @@ internal sealed class ConnectionWorker : IAsyncDisposable
                     }
                     demandGeneration = demand.Generation;
                     demandActive = demand.Active;
+                    Log.Write("capture_demand", demand.Active ? "active" : "inactive");
                     await ApplyDemandAsync(cancellationToken);
                     break;
                 case "pong":
@@ -197,6 +199,12 @@ internal sealed class ConnectionWorker : IAsyncDisposable
                 AudioCaptureService.MonotonicMilliseconds(),
                 pcm);
             await WritePacketAsync(packet, cancellationToken);
+            if (capture.SessionId != lastLoggedAudioSession)
+            {
+                lastLoggedAudioSession = capture.SessionId;
+                var elapsedMs = (long)Stopwatch.GetElapsedTime(capture.StartTimestamp).TotalMilliseconds;
+                Log.Write("capture_first_frame_sent", $"{elapsedMs}ms");
+            }
         }
     }
 

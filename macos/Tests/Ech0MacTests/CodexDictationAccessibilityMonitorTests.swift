@@ -33,6 +33,30 @@ final class CodexDictationAccessibilityMonitorTests: XCTestCase {
         )
     }
 
+    func testAnyActiveComposerTakesPrecedenceOverInactiveComposer() {
+        XCTAssertEqual(
+            CodexDictationAccessibilityStateResolver.resolve(
+                buttonDescriptions: ["Dictate", "Stop dictation"]
+            ),
+            .active
+        )
+        XCTAssertEqual(
+            CodexDictationAccessibilityStateResolver.resolve(
+                buttonDescriptions: ["Transcribe and send", "Dictate"]
+            ),
+            .active
+        )
+    }
+
+    func testMultipleInactiveComposersRemainInactive() {
+        XCTAssertEqual(
+            CodexDictationAccessibilityStateResolver.resolve(
+                buttonDescriptions: ["Dictate", "Unrelated", "Dictate"]
+            ),
+            .inactive
+        )
+    }
+
     func testOnlyResolvedUIStatesAreAvailable() {
         XCTAssertTrue(CodexDictationAccessibilityState.inactive.isAvailable)
         XCTAssertTrue(CodexDictationAccessibilityState.active.isAvailable)

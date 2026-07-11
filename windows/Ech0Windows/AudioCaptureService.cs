@@ -16,10 +16,14 @@ internal sealed class AudioCaptureService : IDisposable
         });
     private readonly PcmFrameAccumulator accumulator = new();
     private WasapiCapture? capture;
+    private long startTimestamp;
+    private bool loggedFirstDataAvailable;
 
     public ChannelReader<byte[]> Frames => frames.Reader;
     public string? DeviceName { get; private set; }
     public bool IsCapturing => capture is not null;
+    public long StartTimestamp => startTimestamp;
+    public int SessionId { get; private set; }
 
     public void Start(string? inputDeviceId = null)
     {
@@ -40,6 +44,9 @@ internal sealed class AudioCaptureService : IDisposable
         nextCapture.RecordingStopped += OnRecordingStopped;
         DeviceName = device.FriendlyName;
         accumulator.Clear();
+        startTimestamp = Stopwatch.GetTimestamp();
+        loggedFirstDataAvailable = false;
+        SessionId++;
         nextCapture.StartRecording();
         capture = nextCapture;
     }
@@ -68,6 +75,12 @@ internal sealed class AudioCaptureService : IDisposable
 
     private void OnDataAvailable(object? sender, WaveInEventArgs args)
     {
+        if (!loggedFirstDataAvailable)
+        {
+            loggedFirstDataAvailable = true;
+            var elapsedMs = (long)Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
+            ThreadPool.QueueUserWorkItem(_ => Log.Write("capture_first_data", $"{elapsedMs}ms"));
+        }
         foreach (var frame in accumulator.Append(args.Buffer.AsSpan(0, args.BytesRecorded)))
         {
             frames.Writer.TryWrite(frame);
