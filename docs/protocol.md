@@ -1,4 +1,4 @@
-# Ech0 Protocol v1
+# Ech0 Protocol v1 and v2
 
 The transport uses a single TCP connection on the local network.
 
@@ -40,9 +40,38 @@ Control messages are JSON objects with a required `kind` field.
   "kind": "serverHello",
   "accepted": true,
   "reason": null,
-  "targetBufferMs": 60
+  "targetBufferMs": 60,
+  "negotiatedProtocolVersion": 2,
+  "capabilities": ["remoteCaptureControl"]
 }
 ```
+
+Version 1 remains sender-driven for Android. A version 2 sender includes `senderId`, `trustedSecret`, and `capabilities: ["remoteCaptureControl"]` in `clientHello`. The server sends the v2 messages below only after negotiating that capability.
+
+### `captureDemand`
+
+```json
+{
+  "kind": "captureDemand",
+  "active": true,
+  "generation": 4
+}
+```
+
+The Mac sends the current demand immediately after handshake. Generations are monotonic within a receiver run; clients ignore older generations.
+
+### `captureStatus`
+
+```json
+{
+  "kind": "captureStatus",
+  "generation": 4,
+  "state": "capturing",
+  "errorCode": null
+}
+```
+
+Valid states are `idle`, `starting`, `capturing`, `paused`, and `error`.
 
 ### `ping`
 
@@ -90,6 +119,7 @@ For the v1 MVP, the audio format is fixed:
 - channels: `1`
 - sample format: `PCM16LE`
 - frame size: `20 ms` (`960` mono samples, `1920` bytes)
+- audio payload size: exactly `1940` bytes including the 20-byte audio header
 
 ## Pairing QR Payload
 
@@ -111,4 +141,5 @@ The QR code and manual pairing data use the same JSON payload:
 - If the token is invalid, the server replies with `serverHello.accepted = false` and closes the session.
 - The sender may send `ping` once per second and compute round-trip time from the echoed `pong`.
 - A `stop` packet is terminal and should be followed by closing the TCP connection.
-
+- Control payloads are limited to 16 KiB and all payloads to 64 KiB.
+- The protocol is not encrypted and must only be used on a trusted local network.

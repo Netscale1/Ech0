@@ -8,6 +8,7 @@ enum ReceiverError: LocalizedError {
     case invalidAudioPayload
     case listenerAlreadyRunning
     case listenerPortUnavailable
+    case packetTooLarge
     case truncatedAudioFrame
     case unsupportedAudioFormat
     case unsupportedControlMessage(String)
@@ -28,6 +29,8 @@ enum ReceiverError: LocalizedError {
             return "The receiver is already listening."
         case .listenerPortUnavailable:
             return "Port 48484 is unavailable."
+        case .packetTooLarge:
+            return "The network packet exceeds the allowed size."
         case .truncatedAudioFrame:
             return "The audio frame header is truncated."
         case .unsupportedAudioFormat:
@@ -37,4 +40,3 @@ enum ReceiverError: LocalizedError {
         }
     }
 }
-
