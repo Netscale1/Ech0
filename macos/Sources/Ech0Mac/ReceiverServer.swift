@@ -1,6 +1,23 @@
 import Foundation
 import Network
 
+struct ReceiverConnectionLiveness {
+    static func timeoutReason(
+        didHandshake: Bool,
+        acceptedAt: TimeInterval,
+        lastPingAt: TimeInterval?,
+        now: TimeInterval,
+        timeout: TimeInterval
+    ) -> String? {
+        if !didHandshake {
+            return now - acceptedAt > timeout ? "handshakeTimeout" : nil
+        }
+
+        guard let lastPingAt else { return "heartbeatTimeout" }
+        return now - lastPingAt > timeout ? "heartbeatTimeout" : nil
+    }
+}
+
 final class ReceiverServer {
     enum ConnectionState: Equatable {
         case idle
@@ -10,10 +27,12 @@ final class ReceiverServer {
     }
 
     private final class ConnectionContext {
+        let acceptedAt = ProcessInfo.processInfo.systemUptime
         var didHandshake = false
         var deviceName = ""
         var protocolVersion = 1
         var supportsRemoteCaptureControl = false
+        var lastPingAt: TimeInterval?
     }
 
     var onAudioFrame: ((AudioFrame) -> Void)?
@@ -25,18 +44,26 @@ final class ReceiverServer {
 
     private let queue = DispatchQueue(label: "net.ech0.receiver.server")
     private let targetBufferMs: Int
+    private let connectionTimeout: TimeInterval
     private let port: UInt16
     private var expectedToken: String
     private var listener: NWListener?
+    private var livenessTimer: DispatchSourceTimer?
     private var activeConnection: NWConnection?
     private var activeContext: ConnectionContext?
     private var captureDemandActive = false
     private var captureDemandGeneration: UInt64 = 0
 
-    init(port: UInt16 = 48_484, token: String, targetBufferMs: Int = 60) {
+    init(
+        port: UInt16 = 48_484,
+        token: String,
+        targetBufferMs: Int = 60,
+        connectionTimeout: TimeInterval = 5
+    ) {
         self.port = port
         self.expectedToken = token
         self.targetBufferMs = targetBufferMs
+        self.connectionTimeout = connectionTimeout
     }
 
     func updateToken(_ token: String) {
@@ -76,12 +103,16 @@ final class ReceiverServer {
             }
         }
         newListener.start(queue: queue)
+        startLivenessTimer()
         onStateChange?(.listening(port: port))
         onLog?("Listening on port \(port)")
     }
 
     func stop() {
         queue.sync {
+            livenessTimer?.cancel()
+            livenessTimer = nil
+            activeConnection?.stateUpdateHandler = nil
             activeConnection?.cancel()
             activeConnection = nil
             activeContext = nil
@@ -97,6 +128,8 @@ final class ReceiverServer {
             onStateChange?(.listening(port: port))
         case .failed(let error):
             onLog?("Listener failed: \(error.localizedDescription)")
+            livenessTimer?.cancel()
+            livenessTimer = nil
             listener?.cancel()
             listener = nil
             onStateChange?(.idle)
@@ -106,6 +139,7 @@ final class ReceiverServer {
     }
 
     private func accept(_ connection: NWConnection) {
+        expireStaleConnectionIfNeeded()
         guard activeConnection == nil else {
             onLog?("Rejected additional sender while one session is active.")
             connection.cancel()
@@ -116,14 +150,19 @@ final class ReceiverServer {
         let context = ConnectionContext()
         activeContext = context
 
-        connection.stateUpdateHandler = { [weak self] state in
-            self?.handleConnectionState(state, context: context)
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let connection else { return }
+            self?.handleConnectionState(state, connection: connection, context: context)
         }
         connection.start(queue: queue)
     }
 
-    private func handleConnectionState(_ state: NWConnection.State, context: ConnectionContext) {
-        guard let connection = activeConnection else { return }
+    private func handleConnectionState(
+        _ state: NWConnection.State,
+        connection: NWConnection,
+        context: ConnectionContext
+    ) {
+        guard activeConnection === connection, activeContext === context else { return }
 
         switch state {
         case .ready:
@@ -236,6 +275,7 @@ final class ReceiverServer {
             }
 
             context.didHandshake = true
+            context.lastPingAt = ProcessInfo.processInfo.systemUptime
             context.deviceName = hello.deviceName
             context.protocolVersion = hello.protocolVersion
             context.supportsRemoteCaptureControl = hello.protocolVersion >= 2
@@ -261,6 +301,7 @@ final class ReceiverServer {
             sendCurrentCaptureDemandIfSupported(on: connection, context: context)
 
         case .ping(let ping):
+            context.lastPingAt = ProcessInfo.processInfo.systemUptime
             sendControl(.pong(PongMessage(monotonicMs: ping.monotonicMs)), on: connection)
 
         case .stop(let stop):
@@ -373,6 +414,7 @@ final class ReceiverServer {
         guard activeConnection === connection else { return }
         activeConnection = nil
         activeContext = nil
+        connection.stateUpdateHandler = nil
         connection.cancel()
 
         if let reason, !reason.isEmpty {
@@ -386,6 +428,31 @@ final class ReceiverServer {
         } else {
             onStateChange?(.idle)
         }
+    }
+
+    private func startLivenessTimer() {
+        livenessTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            self?.expireStaleConnectionIfNeeded()
+        }
+        livenessTimer = timer
+        timer.resume()
+    }
+
+    private func expireStaleConnectionIfNeeded() {
+        guard let connection = activeConnection, let context = activeContext else { return }
+        let reason = ReceiverConnectionLiveness.timeoutReason(
+            didHandshake: context.didHandshake,
+            acceptedAt: context.acceptedAt,
+            lastPingAt: context.lastPingAt,
+            now: ProcessInfo.processInfo.systemUptime,
+            timeout: connectionTimeout
+        )
+        guard let reason else { return }
+        onLog?("Releasing stale sender: \(reason).")
+        handleDisconnect(connection: connection, reason: reason)
     }
 }
 

@@ -139,7 +139,8 @@ The QR code and manual pairing data use the same JSON payload:
 - The server accepts a single active sender.
 - The sender must send `clientHello` before any audio frames.
 - If the token is invalid, the server replies with `serverHello.accepted = false` and closes the session.
-- The sender may send `ping` once per second and compute round-trip time from the echoed `pong`.
+- An active sender sends `ping` once per second and may compute round-trip time from the echoed `pong`.
+- The receiver releases a connection that does not complete its handshake or send a heartbeat for more than 5 seconds, allowing a reconnect without restarting Ech0Mac.
 - A `stop` packet is terminal and should be followed by closing the TCP connection.
 - Control payloads are limited to 16 KiB and all payloads to 64 KiB.
 - The protocol is not encrypted and must only be used on a trusted local network.
