@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import ServiceManagement
 
 struct ReceiverMetrics {
     var framesReceived = 0
@@ -25,6 +26,15 @@ final class ReceiverViewModel: ObservableObject {
     @Published var pairingCode = PairingCode.generate()
     @Published private(set) var qrImage: NSImage?
     @Published private(set) var trustedDevices: [TrustedDevice] = []
+    @Published private(set) var inputConsumers: [String] = []
+    @Published private(set) var remoteCaptureState = "idle"
+    @Published private(set) var codexShortcutCaptureActive = false
+    @Published private(set) var codexAccessibilityState: CodexDictationAccessibilityState = .unavailable
+    @Published var automaticCapturePaused = false {
+        didSet { updateCaptureDemand() }
+    }
+    @Published private(set) var automaticDetectionAvailable = true
+    @Published private(set) var launchAtLoginEnabled = false
 
     let blackHoleDeviceName = "BlackHole 2ch"
     let targetSampleRate = 48_000.0
@@ -32,6 +42,9 @@ final class ReceiverViewModel: ObservableObject {
 
     private let audioEngine = AudioOutputEngine()
     private let trustedDeviceStore = TrustedDeviceStore()
+    private let inputDemandMonitor = AudioInputDemandMonitor()
+    private let codexAccessibilityMonitor = CodexDictationAccessibilityMonitor()
+    private let codexShortcutMonitor = CodexDictationShortcutMonitor()
     private lazy var server = ReceiverServer(port: port, token: pairingCode)
     private var metricsTimer: Timer?
 
@@ -43,12 +56,22 @@ final class ReceiverViewModel: ObservableObject {
         refreshBlackHoleStatus()
         startMetricsTimer()
         restartReceiver()
+        bindInputDemandMonitor()
+        automaticDetectionAvailable = inputDemandMonitor.start(deviceNamed: blackHoleDeviceName)
+        bindCodexAccessibilityMonitor()
+        codexAccessibilityMonitor.start()
+        bindCodexShortcutMonitor()
+        codexShortcutMonitor.start()
+        refreshLaunchAtLoginStatus()
     }
 
     deinit {
         metricsTimer?.invalidate()
         server.stop()
         audioEngine.stop()
+        inputDemandMonitor.stop()
+        codexAccessibilityMonitor.stop()
+        codexShortcutMonitor.stop()
     }
 
     var pairingPayload: PairingPayload {
@@ -121,6 +144,71 @@ final class ReceiverViewModel: ObservableObject {
         appendLog("Forgot trusted device \(device.deviceName).")
     }
 
+    var isCaptureDemandActive: Bool {
+        guard !automaticCapturePaused else { return false }
+        return codexAccessibilityState.isActive
+            || codexShortcutCaptureActive
+            || inputConsumers.contains { !Self.isPersistentCodexConsumer($0) }
+    }
+
+    var isWaitingForCodexDictation: Bool {
+        !automaticCapturePaused
+            && !codexAccessibilityState.isActive
+            && !codexShortcutCaptureActive
+            && inputConsumers.contains(where: Self.isPersistentCodexConsumer)
+            && !inputConsumers.contains { !Self.isPersistentCodexConsumer($0) }
+    }
+
+    var menuBarSymbolName: String {
+        if errorMessage != nil || remoteCaptureState == "error" { return "exclamationmark.triangle" }
+        if remoteCaptureState == "capturing" { return "mic.fill" }
+        if isCaptureDemandActive { return "mic" }
+        return "mic.slash"
+    }
+
+    var menuBarImageName: String {
+        remoteCaptureState == "capturing"
+            ? "Ech0StatusActiveTemplate"
+            : "Ech0StatusIdleTemplate"
+    }
+
+    func toggleAutomaticCapturePause() {
+        automaticCapturePaused.toggle()
+        if automaticCapturePaused {
+            codexShortcutCaptureActive = false
+        }
+    }
+
+    func toggleCodexShortcutCapture() {
+        guard !automaticCapturePaused else { return }
+        codexShortcutCaptureActive.toggle()
+        appendLog(codexShortcutCaptureActive ? "Codex dictation requested." : "Codex dictation ended.")
+        updateCaptureDemand()
+    }
+
+    func openAccessibilitySettings() {
+        codexAccessibilityMonitor.requestPermission()
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func setLaunchAtLogin(enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            refreshLaunchAtLoginStatus()
+        } catch {
+            errorMessage = error.localizedDescription
+            appendLog("Failed to update launch at login: \(error.localizedDescription)")
+            refreshLaunchAtLoginStatus()
+        }
+    }
+
     private func bindCallbacks() {
         server.authenticateTrustedSender = { [weak self] hello in
             guard let self else { return false }
@@ -181,6 +269,78 @@ final class ReceiverViewModel: ObservableObject {
                 self?.apply(state: state)
             }
         }
+
+        server.onCaptureStatus = { [weak self] status in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.remoteCaptureState = status.state
+                if status.state == "idle" || status.state == "paused" {
+                    self.audioEngine.suspend()
+                }
+                if let errorCode = status.errorCode {
+                    self.appendLog("Windows capture error: \(errorCode)")
+                }
+            }
+        }
+    }
+
+    private func bindInputDemandMonitor() {
+        inputDemandMonitor.onConsumersChanged = { [weak self] consumers in
+            guard let self else { return }
+            self.inputConsumers = consumers
+            self.appendLog(
+                consumers.isEmpty
+                    ? "No application is using BlackHole input."
+                    : "BlackHole input requested by \(consumers.joined(separator: ", "))."
+            )
+            self.updateCaptureDemand()
+        }
+        inputDemandMonitor.onUnavailable = { [weak self] in
+            DispatchQueue.main.async {
+                self?.automaticDetectionAvailable = false
+                self?.appendLog("Per-process Core Audio monitoring is unavailable.")
+            }
+        }
+    }
+
+    private func bindCodexShortcutMonitor() {
+        codexShortcutMonitor.onToggle = { [weak self] in
+            guard let self, !self.codexAccessibilityState.isAvailable else { return }
+            self.toggleCodexShortcutCapture()
+        }
+    }
+
+    private func bindCodexAccessibilityMonitor() {
+        codexAccessibilityMonitor.onStateChanged = { [weak self] state in
+            guard let self else { return }
+            let wasActive = self.codexAccessibilityState.isActive
+            self.codexAccessibilityState = state
+            if state.isAvailable {
+                self.codexShortcutCaptureActive = false
+            }
+
+            if state.isActive != wasActive {
+                self.appendLog(
+                    state.isActive
+                        ? "Codex dictation detected."
+                        : "Codex dictation ended."
+                )
+            } else if state == .permissionRequired {
+                self.appendLog("Accessibility access is required for automatic Codex detection.")
+            }
+            self.updateCaptureDemand()
+        }
+    }
+
+    private func updateCaptureDemand() {
+        server.updateCaptureDemand(active: isCaptureDemandActive)
+        if !isCaptureDemandActive {
+            audioEngine.suspend()
+        }
+    }
+
+    private func refreshLaunchAtLoginStatus() {
+        launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     }
 
     private func apply(state: ReceiverServer.ConnectionState) {
@@ -206,7 +366,7 @@ final class ReceiverViewModel: ObservableObject {
             clientName = nil
 
         case .connected(let deviceName):
-            connectionLabel = "Streaming"
+            connectionLabel = remoteCaptureState == "capturing" ? "Streaming" : "Connected"
             clientName = deviceName
         }
     }
@@ -251,6 +411,10 @@ final class ReceiverViewModel: ObservableObject {
         }
         let rms = sqrt(sumOfSquares / Double(samples.count))
         return min(1, rms * 4)
+    }
+
+    private static func isPersistentCodexConsumer(_ label: String) -> Bool {
+        label == "com.openai.codex.helper"
     }
 
     private func appendLog(_ line: String) {

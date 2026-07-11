@@ -11,6 +11,7 @@ struct ClientHello: Codable {
     let deviceName: String
     let senderId: String?
     let trustedSecret: String?
+    let capabilities: [String]?
     let sampleRate: Int
     let channels: Int
     let frameMs: Int
@@ -21,6 +22,21 @@ struct ServerHello: Codable {
     let accepted: Bool
     let reason: String?
     let targetBufferMs: Int
+    let negotiatedProtocolVersion: Int?
+    let capabilities: [String]?
+}
+
+struct CaptureDemand: Codable {
+    let kind = "captureDemand"
+    let active: Bool
+    let generation: UInt64
+}
+
+struct CaptureStatus: Codable {
+    let kind = "captureStatus"
+    let generation: UInt64
+    let state: String
+    let errorCode: String?
 }
 
 struct PingMessage: Codable {
@@ -44,6 +60,8 @@ enum ControlMessage {
     case ping(PingMessage)
     case pong(PongMessage)
     case stop(StopMessage)
+    case captureDemand(CaptureDemand)
+    case captureStatus(CaptureStatus)
 }
 
 enum ControlMessageCodec {
@@ -62,6 +80,10 @@ enum ControlMessageCodec {
             return try encoder.encode(value)
         case .stop(let value):
             return try encoder.encode(value)
+        case .captureDemand(let value):
+            return try encoder.encode(value)
+        case .captureStatus(let value):
+            return try encoder.encode(value)
         }
     }
 
@@ -78,6 +100,10 @@ enum ControlMessageCodec {
             return .pong(try decoder.decode(PongMessage.self, from: data))
         case "stop":
             return .stop(try decoder.decode(StopMessage.self, from: data))
+        case "captureDemand":
+            return .captureDemand(try decoder.decode(CaptureDemand.self, from: data))
+        case "captureStatus":
+            return .captureStatus(try decoder.decode(CaptureStatus.self, from: data))
         default:
             throw ReceiverError.unsupportedControlMessage(probe.kind)
         }

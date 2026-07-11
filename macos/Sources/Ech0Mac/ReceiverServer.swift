@@ -12,6 +12,8 @@ final class ReceiverServer {
     private final class ConnectionContext {
         var didHandshake = false
         var deviceName = ""
+        var protocolVersion = 1
+        var supportsRemoteCaptureControl = false
     }
 
     var onAudioFrame: ((AudioFrame) -> Void)?
@@ -19,6 +21,7 @@ final class ReceiverServer {
     var onStateChange: ((ConnectionState) -> Void)?
     var authenticateTrustedSender: ((ClientHello) -> Bool)?
     var trustSenderFromPairing: ((ClientHello) -> Void)?
+    var onCaptureStatus: ((CaptureStatus) -> Void)?
 
     private let queue = DispatchQueue(label: "net.ech0.receiver.server")
     private let targetBufferMs: Int
@@ -26,6 +29,9 @@ final class ReceiverServer {
     private var expectedToken: String
     private var listener: NWListener?
     private var activeConnection: NWConnection?
+    private var activeContext: ConnectionContext?
+    private var captureDemandActive = false
+    private var captureDemandGeneration: UInt64 = 0
 
     init(port: UInt16 = 48_484, token: String, targetBufferMs: Int = 60) {
         self.port = port
@@ -55,6 +61,11 @@ final class ReceiverServer {
             throw ReceiverError.listenerPortUnavailable
         }
 
+        newListener.service = NWListener.Service(
+            name: Host.current().localizedName ?? "Ech0 Mac",
+            type: "_ech0._tcp"
+        )
+
         listener = newListener
         newListener.stateUpdateHandler = { [weak self] state in
             self?.handleListenerState(state)
@@ -73,6 +84,7 @@ final class ReceiverServer {
         queue.sync {
             activeConnection?.cancel()
             activeConnection = nil
+            activeContext = nil
             listener?.cancel()
             listener = nil
         }
@@ -102,6 +114,7 @@ final class ReceiverServer {
 
         activeConnection = connection
         let context = ConnectionContext()
+        activeContext = context
 
         connection.stateUpdateHandler = { [weak self] state in
             self?.handleConnectionState(state, context: context)
@@ -138,6 +151,15 @@ final class ReceiverServer {
             case .success(let header):
                 let type = header[header.startIndex]
                 let length = Int(header.readUInt32BE(at: 1))
+
+                guard length <= PacketCodec.maximumPayloadSize else {
+                    self.handleDisconnect(connection: connection, reason: ReceiverError.packetTooLarge.localizedDescription)
+                    return
+                }
+                if type == PacketCodec.controlType, length > PacketCodec.maximumControlPayloadSize {
+                    self.handleDisconnect(connection: connection, reason: ReceiverError.packetTooLarge.localizedDescription)
+                    return
+                }
 
                 self.receiveExact(on: connection, length: length) { [weak self] result in
                     guard let self else { return }
@@ -198,7 +220,7 @@ final class ReceiverServer {
     ) {
         switch message {
         case .clientHello(let hello):
-            guard hello.protocolVersion == 1 else {
+            guard hello.protocolVersion == 1 || hello.protocolVersion == 2 else {
                 reject(connection: connection, reason: "unsupportedProtocol")
                 return
             }
@@ -215,6 +237,9 @@ final class ReceiverServer {
 
             context.didHandshake = true
             context.deviceName = hello.deviceName
+            context.protocolVersion = hello.protocolVersion
+            context.supportsRemoteCaptureControl = hello.protocolVersion >= 2
+                && (hello.capabilities ?? []).contains("remoteCaptureControl")
             if acceptedByToken {
                 trustSenderFromPairing?(hello)
             }
@@ -223,7 +248,9 @@ final class ReceiverServer {
                     ServerHello(
                         accepted: true,
                         reason: nil,
-                        targetBufferMs: targetBufferMs
+                        targetBufferMs: targetBufferMs,
+                        negotiatedProtocolVersion: hello.protocolVersion,
+                        capabilities: context.supportsRemoteCaptureControl ? ["remoteCaptureControl"] : []
                     )
                 ),
                 on: connection
@@ -231,6 +258,7 @@ final class ReceiverServer {
             let authMode = acceptedByTrustedIdentity && !acceptedByToken ? "trusted device" : "pairing token"
             onLog?("Accepted sender \(hello.deviceName) via \(authMode).")
             onStateChange?(.connected(deviceName: hello.deviceName))
+            sendCurrentCaptureDemandIfSupported(on: connection, context: context)
 
         case .ping(let ping):
             sendControl(.pong(PongMessage(monotonicMs: ping.monotonicMs)), on: connection)
@@ -239,7 +267,11 @@ final class ReceiverServer {
             onLog?("Sender stopped session: \(stop.reason)")
             handleDisconnect(connection: connection, reason: stop.reason)
 
-        case .serverHello, .pong:
+        case .captureStatus(let status):
+            guard context.supportsRemoteCaptureControl else { return }
+            onCaptureStatus?(status)
+
+        case .serverHello, .pong, .captureDemand:
             break
         }
     }
@@ -248,9 +280,11 @@ final class ReceiverServer {
         sendControl(
             .serverHello(
                 ServerHello(
-                    accepted: false,
-                    reason: reason,
-                    targetBufferMs: targetBufferMs
+                        accepted: false,
+                        reason: reason,
+                        targetBufferMs: targetBufferMs,
+                        negotiatedProtocolVersion: nil,
+                        capabilities: nil
                 )
             ),
             on: connection
@@ -273,6 +307,26 @@ final class ReceiverServer {
         } catch {
             handleDisconnect(connection: connection, reason: error.localizedDescription)
         }
+    }
+
+    func updateCaptureDemand(active: Bool) {
+        queue.async {
+            guard self.captureDemandActive != active else { return }
+            self.captureDemandActive = active
+            self.captureDemandGeneration &+= 1
+            guard let connection = self.activeConnection, let context = self.activeContext else { return }
+            self.sendCurrentCaptureDemandIfSupported(on: connection, context: context)
+        }
+    }
+
+    private func sendCurrentCaptureDemandIfSupported(on connection: NWConnection, context: ConnectionContext) {
+        guard context.supportsRemoteCaptureControl else { return }
+        sendControl(
+            .captureDemand(
+                CaptureDemand(active: captureDemandActive, generation: captureDemandGeneration)
+            ),
+            on: connection
+        )
     }
 
     private func receiveExact(
@@ -318,6 +372,7 @@ final class ReceiverServer {
     private func handleDisconnect(connection: NWConnection, reason: String?) {
         guard activeConnection === connection else { return }
         activeConnection = nil
+        activeContext = nil
         connection.cancel()
 
         if let reason, !reason.isEmpty {

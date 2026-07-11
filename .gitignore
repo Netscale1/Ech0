@@ -11,3 +11,6 @@
 /android/captures/
 /macos/.swiftpm/
 *.log
+/dist/
+/windows/**/bin/
+/windows/**/obj/

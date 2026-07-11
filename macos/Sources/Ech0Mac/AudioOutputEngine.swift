@@ -41,6 +41,14 @@ final class AudioOutputEngine {
         jitterBuffer.reset()
     }
 
+    func suspend() {
+        if let audioUnit, isRunning {
+            AudioOutputUnitStop(audioUnit)
+        }
+        isRunning = false
+        jitterBuffer.reset()
+    }
+
     deinit {
         stop()
     }

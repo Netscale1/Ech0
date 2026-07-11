@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <ApplicationIcon>Resources\Ech0App.ico</ApplicationIcon>
+    <AssemblyName>Ech0Windows</AssemblyName>
+    <RootNamespace>Ech0.Windows</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\Ech0Disconnected.ico" LogicalName="Ech0.Windows.Resources.Ech0Disconnected.ico" />
+    <EmbeddedResource Include="Resources\Ech0Waiting.ico" LogicalName="Ech0.Windows.Resources.Ech0Waiting.ico" />
+    <EmbeddedResource Include="Resources\Ech0Unavailable.ico" LogicalName="Ech0.Windows.Resources.Ech0Unavailable.ico" />
+    <EmbeddedResource Include="Resources\Ech0Capturing.ico" LogicalName="Ech0.Windows.Resources.Ech0Capturing.ico" />
+  </ItemGroup>
+</Project>

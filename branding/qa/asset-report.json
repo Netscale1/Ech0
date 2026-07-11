@@ -1,0 +1,23 @@
+{
+  "source": "branding/sources/ech0-active-imagegen.png",
+  "masterSize": 2048,
+  "activeSymmetryMeanError": 0.0,
+  "idleSymmetryMeanError": 0.0,
+  "transparentCorners": true,
+  "windowsIcoSizes": [
+    16,
+    20,
+    24,
+    32,
+    48,
+    64,
+    128,
+    256
+  ],
+  "palette": {
+    "Disconnected": "#7A7A80",
+    "Waiting": "#0A84FF",
+    "Unavailable": "#F5A623",
+    "Capturing": "#F20C7A"
+  }
+}

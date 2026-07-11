@@ -19,7 +19,11 @@ struct AudioFrame {
 enum PacketCodec {
     static let controlType: UInt8 = 0x01
     static let audioType: UInt8 = 0x02
-    private static let audioHeaderSize = 20
+    static let maximumControlPayloadSize = 16 * 1_024
+    static let maximumPayloadSize = 64 * 1_024
+    static let audioSamplesPerFrame = 960
+    static let audioHeaderSize = 20
+    static let audioPayloadSize = audioHeaderSize + audioSamplesPerFrame * 2
 
     static func encodePacket(type: UInt8, payload: Data) -> Data {
         var packet = Data([type])
@@ -55,6 +59,9 @@ enum PacketCodec {
     static func decodeAudioFrame(_ payload: Data) throws -> AudioFrame {
         guard payload.count >= audioHeaderSize else {
             throw ReceiverError.truncatedAudioFrame
+        }
+        guard payload.count == audioPayloadSize else {
+            throw ReceiverError.invalidAudioPayload
         }
 
         let sequence = payload.readUInt64BE(at: 0)
