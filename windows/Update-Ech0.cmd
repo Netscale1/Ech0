@@ -12,7 +12,8 @@ if not exist "%SOURCE%" (
 )
 
 taskkill /IM Ech0Windows.exe /F >nul 2>&1
-timeout /t 2 /nobreak >nul
+rem Use a loopback ping for delays because timeout requires an interactive console.
+ping 127.0.0.1 -n 3 >nul 2>&1
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 copy /Y "%SOURCE%" "%TARGET%" >nul
@@ -24,4 +25,4 @@ if errorlevel 1 (
 
 start "" "%TARGET%"
 echo Ech0 was updated and restarted.
-timeout /t 3 /nobreak >nul
+ping 127.0.0.1 -n 4 >nul 2>&1
