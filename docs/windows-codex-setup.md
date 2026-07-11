@@ -77,6 +77,8 @@ Ech0Mac pubblica il servizio DNS-SD `_ech0._tcp.local`. Ech0Windows prova prima 
 
 Dopo il pairing, Windows genera un `senderId` persistente e un segreto casuale. Il segreto è protetto con DPAPI `CurrentUser` su Windows; sul Mac viene conservato soltanto l’hash. Un dispositivo già fidato può riconnettersi senza inserire nuovamente il codice.
 
+Windows invia un heartbeat ogni secondo. Se un crash, una sospensione o un cambio rete lascia una socket incompleta, Ech0Mac libera automaticamente lo slot sender dopo 5 secondi e consente la riconnessione successiva.
+
 ## 4. Attivazione automatica
 
 Ech0Mac usa due segnali distinti:
