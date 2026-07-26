@@ -1,6 +1,18 @@
 import AppKit
 import SwiftUI
 
+func makeEch0RelaunchProcess(bundlePath: String) -> Process {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = [
+        "-c",
+        "sleep 0.5; exec /usr/bin/open -n \"$1\"",
+        "ech0-restart",
+        bundlePath
+    ]
+    return process
+}
+
 @main
 struct Ech0MacApp: App {
     @NSApplicationDelegateAdaptor(Ech0AppDelegate.self) private var appDelegate
@@ -91,6 +103,15 @@ private struct MenuBarContent: View {
             )
         )
         Divider()
+        Button("Restart Ech0") {
+            let relaunchProcess = makeEch0RelaunchProcess(bundlePath: Bundle.main.bundlePath)
+            do {
+                try relaunchProcess.run()
+                NSApp.terminate(nil)
+            } catch {
+                NSSound.beep()
+            }
+        }
         Button("Quit") {
             NSApp.terminate(nil)
         }
