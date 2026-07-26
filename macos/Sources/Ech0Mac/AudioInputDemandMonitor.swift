@@ -1,8 +1,11 @@
 import CoreAudio
 import Foundation
 
-final class AudioInputDemandMonitor {
-    typealias Consumer = (objectID: AudioObjectID, label: String)
+final class AudioInputDemandMonitor: @unchecked Sendable {
+    struct Consumer: Equatable {
+        let objectID: AudioObjectID
+        let label: String
+    }
 
     var onConsumersChanged: (([String]) -> Void)?
     var onUnavailable: (() -> Void)?
@@ -15,6 +18,7 @@ final class AudioInputDemandMonitor {
     }
 
     private let queue = DispatchQueue(label: "net.ech0.receiver.audio-demand")
+    private let queueKey = DispatchSpecificKey<Void>()
     private let ignoredBundleIdentifiers: Set<String>
     private let stopDelay: TimeInterval
     private var systemRegistration: (AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)?
@@ -30,16 +34,22 @@ final class AudioInputDemandMonitor {
     ) {
         self.stopDelay = stopDelay
         self.ignoredBundleIdentifiers = ignoredBundleIdentifiers
+        queue.setSpecific(key: queueKey, value: ())
     }
 
     @discardableResult
     func start(deviceNamed name: String = "BlackHole 2ch") -> Bool {
+        syncOnQueue {
+            startOnQueue(deviceNamed: name)
+        }
+    }
+
+    private func startOnQueue(deviceNamed name: String) -> Bool {
         guard !isStarted else { return targetDeviceID != nil }
         isStarted = true
 
         guard let device = SystemAudio.deviceNamed(name) else {
-            onUnavailable?()
-            return false
+            return failStartOnQueue()
         }
         targetDeviceID = device.id
 
@@ -50,23 +60,27 @@ final class AudioInputDemandMonitor {
             mElement: kAudioObjectPropertyElementMain
         )
         guard AudioObjectHasProperty(system, &address) else {
-            onUnavailable?()
-            return false
+            return failStartOnQueue()
         }
 
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.queue.async { self?.refreshProcessesAndDemand() }
+            self?.refreshProcessesAndDemand()
         }
         guard AudioObjectAddPropertyListenerBlock(system, &address, queue, block) == noErr else {
-            onUnavailable?()
-            return false
+            return failStartOnQueue()
         }
         systemRegistration = (address, block)
-        queue.async { [weak self] in self?.refreshProcessesAndDemand() }
+        refreshProcessesAndDemand()
         return true
     }
 
     func stop() {
+        syncOnQueue {
+            stopOnQueue()
+        }
+    }
+
+    private func stopOnQueue() {
         guard isStarted else { return }
         isStarted = false
         pendingStop?.cancel()
@@ -86,6 +100,7 @@ final class AudioInputDemandMonitor {
         }
         processRegistrations.removeAll()
         currentConsumers.removeAll()
+        targetDeviceID = nil
     }
 
     deinit {
@@ -139,17 +154,22 @@ final class AudioInputDemandMonitor {
                 return nil
             }
             let label = bundleID ?? "Audio process \(objectID)"
-            return (objectID, label)
+            return Consumer(objectID: objectID, label: label)
         }
         apply(consumers: consumers)
     }
 
     private func apply(consumers: [Consumer]) {
-        if !consumers.isEmpty {
+        let normalizedConsumers = consumers.sorted {
+            if $0.objectID != $1.objectID { return $0.objectID < $1.objectID }
+            return $0.label < $1.label
+        }
+        if !normalizedConsumers.isEmpty {
             pendingStop?.cancel()
             pendingStop = nil
-            currentConsumers = consumers
-            publish(consumers)
+            guard normalizedConsumers != currentConsumers else { return }
+            currentConsumers = normalizedConsumers
+            publish(normalizedConsumers)
             return
         }
 
@@ -183,10 +203,10 @@ final class AudioInputDemandMonitor {
             mElement: kAudioObjectPropertyElementMain
         )
         let runningBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.queue.async { self?.refreshProcessesAndDemand() }
+            self?.refreshProcessesAndDemand()
         }
         let devicesBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.queue.async { self?.refreshProcessesAndDemand() }
+            self?.refreshProcessesAndDemand()
         }
         guard AudioObjectAddPropertyListenerBlock(objectID, &runningAddress, queue, runningBlock) == noErr else {
             return
@@ -259,11 +279,28 @@ final class AudioInputDemandMonitor {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        var value: CFString = "" as CFString
-        var size = UInt32(MemoryLayout<CFString>.size)
-        guard AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value) == noErr else {
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard
+            AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value) == noErr,
+            let value
+        else {
             return nil
         }
-        return value as String
+        return value.takeRetainedValue() as String
+    }
+
+    private func failStartOnQueue() -> Bool {
+        isStarted = false
+        targetDeviceID = nil
+        onUnavailable?()
+        return false
+    }
+
+    private func syncOnQueue<T>(_ body: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return body()
+        }
+        return queue.sync(execute: body)
     }
 }

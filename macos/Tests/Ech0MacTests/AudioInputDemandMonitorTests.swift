@@ -26,4 +26,14 @@ final class AudioInputDemandMonitorTests: XCTestCase {
             )
         )
     }
+
+    func testFailedStartCanBeRetried() {
+        let monitor = AudioInputDemandMonitor()
+        var unavailableCount = 0
+        monitor.onUnavailable = { unavailableCount += 1 }
+
+        XCTAssertFalse(monitor.start(deviceNamed: "Ech0 Missing Test Device"))
+        XCTAssertFalse(monitor.start(deviceNamed: "Ech0 Missing Test Device"))
+        XCTAssertEqual(unavailableCount, 2)
+    }
 }

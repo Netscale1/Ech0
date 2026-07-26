@@ -26,4 +26,17 @@ final class CodexDictationShortcutMonitorTests: XCTestCase {
         XCTAssertFalse(detector.update(commandDown: false, otherModifierDown: false, timestamp: 1.9))
         XCTAssertFalse(detector.update(commandDown: true, otherModifierDown: true, timestamp: 2.0))
     }
+
+    func testMonitorCanStartAndStopRepeatedly() {
+        let monitor = CodexDictationShortcutMonitor()
+
+        monitor.start()
+        XCTAssertTrue(monitor.isRunning)
+        monitor.stop()
+        XCTAssertFalse(monitor.isRunning)
+        monitor.start()
+        XCTAssertTrue(monitor.isRunning)
+        monitor.stop()
+        XCTAssertFalse(monitor.isRunning)
+    }
 }

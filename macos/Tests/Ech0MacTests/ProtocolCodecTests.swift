@@ -8,10 +8,11 @@ final class ProtocolCodecTests: XCTestCase {
                 accepted: true,
                 reason: nil,
                 targetBufferMs: 60,
-                negotiatedProtocolVersion: 2,
-                capabilities: ["remoteCaptureControl"],
+                negotiatedProtocolVersion: 3,
+                capabilities: ["remoteCaptureControl", "secureTransportV3"],
                 receiverId: "receiver-1",
                 receiverName: "Mac mini",
+                receiverKeyHash: "key-hash",
                 authentication: "trusted",
                 trustEstablished: true
             )
@@ -34,12 +35,12 @@ final class ProtocolCodecTests: XCTestCase {
     func testClientHelloRoundTripWithTrustedFields() throws {
         let message = ControlMessage.clientHello(
             ClientHello(
-                protocolVersion: 1,
-                token: "123456",
-                deviceName: "Pixel 9",
+                protocolVersion: 3,
+                token: PairingCode.generate(),
+                deviceName: "Windows PC",
                 senderId: "sender-1",
                 trustedSecret: "secret-1",
-                capabilities: nil,
+                capabilities: ["remoteCaptureControl", "secureTransportV3"],
                 sampleRate: 48_000,
                 channels: 1,
                 frameMs: 20

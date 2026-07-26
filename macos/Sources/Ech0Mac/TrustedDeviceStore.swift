@@ -29,17 +29,26 @@ final class TrustedDeviceStore {
 
         let secretHash = Self.hash(secret: trustedSecret)
         return lock.withLock {
-            guard let index = devices.firstIndex(where: { $0.id == senderId && $0.secretHash == secretHash }) else {
+            guard let index = devices.firstIndex(where: { $0.id == senderId }),
+                  SecureHandshake.constantTimeEquals(
+                    Data(devices[index].secretHash.utf8),
+                    Data(secretHash.utf8)
+                  ) else {
                 return false
             }
+            let previousDevice = devices[index]
             devices[index].lastSeenAt = Date()
-            persistUnlocked()
+            do {
+                try persistUnlocked()
+            } catch {
+                devices[index] = previousDevice
+            }
             return true
         }
     }
 
     @discardableResult
-    func trust(senderId: String?, deviceName: String, trustedSecret: String?) -> TrustUpdate? {
+    func trust(senderId: String?, deviceName: String, trustedSecret: String?) throws -> TrustUpdate? {
         guard
             let senderId,
             !senderId.isEmpty,
@@ -52,54 +61,73 @@ final class TrustedDeviceStore {
         let now = Date()
         let secretHash = Self.hash(secret: trustedSecret)
 
-        return lock.withLock {
-            var evicted: TrustedDevice?
+        return try lock.withLock {
+            let previousDevices = devices
+            do {
+                var evicted: TrustedDevice?
 
-            if let index = devices.firstIndex(where: { $0.id == senderId }) {
-                devices[index].deviceName = deviceName
-                devices[index].lastSeenAt = now
-                devices[index] = TrustedDevice(
+                if let index = devices.firstIndex(where: { $0.id == senderId }) {
+                    devices[index] = TrustedDevice(
+                        id: senderId,
+                        deviceName: deviceName,
+                        secretHash: secretHash,
+                        firstTrustedAt: devices[index].firstTrustedAt,
+                        lastSeenAt: now
+                    )
+                    try persistUnlocked()
+                    return TrustUpdate(device: devices[index], wasNew: false, evicted: nil)
+                }
+
+                if devices.count >= 2,
+                   let oldestIndex = devices.indices.min(by: {
+                       devices[$0].lastSeenAt < devices[$1].lastSeenAt
+                   }) {
+                    evicted = devices.remove(at: oldestIndex)
+                }
+
+                let device = TrustedDevice(
                     id: senderId,
                     deviceName: deviceName,
                     secretHash: secretHash,
-                    firstTrustedAt: devices[index].firstTrustedAt,
+                    firstTrustedAt: now,
                     lastSeenAt: now
                 )
-                persistUnlocked()
-                return TrustUpdate(device: devices[index], wasNew: false, evicted: nil)
+                devices.append(device)
+                try persistUnlocked()
+                return TrustUpdate(device: device, wasNew: true, evicted: evicted)
+            } catch {
+                devices = previousDevices
+                throw error
             }
-
-            if devices.count >= 2, let oldestIndex = devices.indices.min(by: { devices[$0].lastSeenAt < devices[$1].lastSeenAt }) {
-                evicted = devices.remove(at: oldestIndex)
-            }
-
-            let device = TrustedDevice(
-                id: senderId,
-                deviceName: deviceName,
-                secretHash: secretHash,
-                firstTrustedAt: now,
-                lastSeenAt: now
-            )
-            devices.append(device)
-            persistUnlocked()
-            return TrustUpdate(device: device, wasNew: true, evicted: evicted)
         }
     }
 
     @discardableResult
-    func forget(id: String) -> Bool {
-        lock.withLock {
+    func forget(id: String) throws -> Bool {
+        try lock.withLock {
             guard let index = devices.firstIndex(where: { $0.id == id }) else {
                 return false
             }
+            let previousDevices = devices
             devices.remove(at: index)
-            persistUnlocked()
-            return true
+            do {
+                try persistUnlocked()
+                return true
+            } catch {
+                devices = previousDevices
+                throw error
+            }
         }
     }
 
     private func load() {
         lock.withLock {
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                guard (try? applyPrivatePermissions()) != nil else {
+                    devices = []
+                    return
+                }
+            }
             guard let data = try? Data(contentsOf: fileURL) else {
                 devices = []
                 return
@@ -108,28 +136,42 @@ final class TrustedDeviceStore {
         }
     }
 
-    private func persistUnlocked() {
-        do {
-            let directory = fileURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true,
-                attributes: nil
-            )
-            let data = try JSONEncoder().encode(devices)
-            try data.write(to: fileURL, options: .atomic)
-        } catch {
-            // Keep the in-memory state even if persistence fails.
-        }
+    private func persistUnlocked() throws {
+        let directory = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path
+        )
+        let data = try JSONEncoder().encode(devices)
+        try data.write(to: fileURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
+    }
+
+    private func applyPrivatePermissions() throws {
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: fileURL.deletingLastPathComponent().path
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
     }
 
     private static func defaultFileURL() -> URL {
-        let base = (try? FileManager.default.url(
+        let base = FileManager.default.urls(
             for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )) ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            in: .userDomainMask
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
 
         return base
             .appendingPathComponent("Ech0Mac", isDirectory: true)
@@ -148,9 +190,9 @@ struct TrustUpdate {
 }
 
 private extension NSLock {
-    func withLock<T>(_ body: () -> T) -> T {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()
         defer { unlock() }
-        return body()
+        return try body()
     }
 }

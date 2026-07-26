@@ -5,7 +5,7 @@ struct Packet {
     let payload: Data
 }
 
-struct AudioFrame {
+struct AudioFrame: Sendable {
     let sequence: UInt64
     let captureTimestampMs: UInt64
     let flags: UInt32

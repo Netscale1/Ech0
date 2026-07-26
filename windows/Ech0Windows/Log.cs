@@ -11,12 +11,30 @@ internal static class Log
 
     public static void Write(string eventName, string? detail = null)
     {
-        lock (Gate)
+        _ = TryWrite(() =>
         {
-            Directory.CreateDirectory(DirectoryPath);
-            RotateIfNeeded();
-            var safeDetail = detail?.Replace('\r', ' ').Replace('\n', ' ');
-            File.AppendAllText(CurrentPath, $"{DateTimeOffset.Now:O}\t{eventName}\t{safeDetail}{Environment.NewLine}");
+            lock (Gate)
+            {
+                Directory.CreateDirectory(DirectoryPath);
+                RotateIfNeeded();
+                var safeDetail = detail?.Replace('\r', ' ').Replace('\n', ' ');
+                File.AppendAllText(CurrentPath, $"{DateTimeOffset.Now:O}\t{eventName}\t{safeDetail}{Environment.NewLine}");
+            }
+        });
+    }
+
+    internal static bool TryWrite(Action operation)
+    {
+        try
+        {
+            operation();
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or System.Security.SecurityException)
+        {
+            return false;
         }
     }
 

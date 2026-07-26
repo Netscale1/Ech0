@@ -88,7 +88,7 @@ struct ContentView: View {
                     model.openAccessibilitySettings()
                 }
                 .controlSize(.large)
-            } else if model.isWaitingForCodexDictation || model.codexShortcutCaptureActive {
+            } else if model.canUseCodexManualFallback || model.codexShortcutCaptureActive {
                 Button(model.codexShortcutCaptureActive ? "Stop manual" : "Start manually") {
                     model.toggleCodexShortcutCapture()
                 }
@@ -131,21 +131,11 @@ struct ContentView: View {
     }
 
     private var statusMetrics: some View {
-        HStack(alignment: .top, spacing: 34) {
-            metricColumn([
-                ("Capture", captureLabel),
-                ("Consumers", "\(model.inputConsumers.count)"),
-                ("Buffered", "\(model.metrics.bufferedMs) ms"),
-            ])
-
-            Divider()
-
-            metricColumn([
-                ("Frames", "\(model.metrics.framesReceived)"),
-                ("Underruns", "\(model.metrics.underruns)"),
-                ("Overruns", "\(model.metrics.overruns)"),
-            ])
-        }
+        ReceiverStatusMetrics(
+            metrics: model.metrics,
+            captureLabel: captureLabel,
+            consumerCount: model.inputConsumers.count
+        )
         .padding(.horizontal, 38)
         .padding(.vertical, 26)
     }
@@ -171,17 +161,6 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderless)
                     .help("Copy pairing code")
-                }
-
-                if let qrImage = model.qrImage {
-                    Image(nsImage: qrImage)
-                        .interpolation(.none)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 128, height: 128)
-                        .padding(8)
-                        .background(Color.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
 
                 HStack {
@@ -256,24 +235,11 @@ struct ContentView: View {
                         .foregroundStyle(.red)
                 }
 
-                HStack(alignment: .top, spacing: 34) {
-                    metricColumn([
-                        ("Frames received", "\(model.metrics.framesReceived)"),
-                        ("Buffered", "\(model.metrics.bufferedMs) ms"),
-                        ("Target buffer", "\(model.metrics.targetBufferMs) ms"),
-                        ("Underruns", "\(model.metrics.underruns)"),
-                        ("Overruns", "\(model.metrics.overruns)"),
-                    ])
-
-                    Divider()
-
-                    metricColumn([
-                        ("Stale drops", "\(model.metrics.staleDrops)"),
-                        ("Last sequence", model.metrics.lastSequence.map(String.init) ?? "—"),
-                        ("BlackHole consumers", "\(model.inputConsumers.count)"),
-                        ("Windows capture", model.remoteCaptureState),
-                    ])
-                }
+                ReceiverDiagnosticsMetrics(
+                    metrics: model.metrics,
+                    consumerCount: model.inputConsumers.count,
+                    remoteCaptureState: model.remoteCaptureState
+                )
 
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Recent events")
@@ -343,26 +309,7 @@ struct ContentView: View {
     }
 
     private var levelMeter: some View {
-        VStack(spacing: 8) {
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Rectangle().fill(Color(nsColor: .separatorColor))
-                    Rectangle()
-                        .fill(signalColor)
-                        .frame(width: geometry.size.width * model.metrics.inputLevel)
-                }
-            }
-            .frame(height: 3)
-
-            HStack {
-                Text("Input level")
-                Spacer()
-                Text("\(Int(model.metrics.inputLevel * 100))%")
-                    .monospacedDigit()
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
+        ReceiverLevelMeter(metrics: model.metrics, signalColor: signalColor)
     }
 
     private func endpoint(symbol: String, title: String, detail: String) -> some View {
@@ -388,25 +335,6 @@ struct ContentView: View {
         Rectangle()
             .fill(active ? signalColor : Color(nsColor: .separatorColor))
             .frame(maxWidth: .infinity, minHeight: 2, maxHeight: 2)
-    }
-
-    private func metricColumn(_ rows: [(String, String)]) -> some View {
-        VStack(spacing: 0) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { row in
-                HStack {
-                    Text(row.element.0)
-                    Spacer()
-                    Text(row.element.1)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                .padding(.vertical, 10)
-                if row.offset < rows.count - 1 {
-                    Divider()
-                }
-            }
-        }
-        .frame(maxWidth: .infinity)
     }
 
     private func labeledValue(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
@@ -485,6 +413,104 @@ struct ContentView: View {
     }
 }
 
+private struct ReceiverStatusMetrics: View {
+    @ObservedObject var metrics: ReceiverMetricsModel
+    let captureLabel: String
+    let consumerCount: Int
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 34) {
+            MetricColumn(rows: [
+                ("Capture", captureLabel),
+                ("Consumers", "\(consumerCount)"),
+                ("Buffered", "\(metrics.value.bufferedMs) ms"),
+            ])
+            Divider()
+            MetricColumn(rows: [
+                ("Frames", "\(metrics.value.framesReceived)"),
+                ("Underruns", "\(metrics.value.underruns)"),
+                ("Overruns", "\(metrics.value.overruns)"),
+            ])
+        }
+    }
+}
+
+private struct ReceiverDiagnosticsMetrics: View {
+    @ObservedObject var metrics: ReceiverMetricsModel
+    let consumerCount: Int
+    let remoteCaptureState: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 34) {
+            MetricColumn(rows: [
+                ("Frames received", "\(metrics.value.framesReceived)"),
+                ("Buffered", "\(metrics.value.bufferedMs) ms"),
+                ("Target buffer", "\(metrics.value.targetBufferMs) ms"),
+                ("Underruns", "\(metrics.value.underruns)"),
+                ("Overruns", "\(metrics.value.overruns)"),
+            ])
+            Divider()
+            MetricColumn(rows: [
+                ("Stale drops", "\(metrics.value.staleDrops)"),
+                ("Last sequence", metrics.value.lastSequence.map(String.init) ?? "—"),
+                ("BlackHole consumers", "\(consumerCount)"),
+                ("Windows capture", remoteCaptureState),
+            ])
+        }
+    }
+}
+
+private struct ReceiverLevelMeter: View {
+    @ObservedObject var metrics: ReceiverMetricsModel
+    let signalColor: Color
+
+    var body: some View {
+        VStack(spacing: 8) {
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Rectangle().fill(Color(nsColor: .separatorColor))
+                    Rectangle()
+                        .fill(signalColor)
+                        .frame(width: geometry.size.width * metrics.value.inputLevel)
+                }
+            }
+            .frame(height: 3)
+
+            HStack {
+                Text("Input level")
+                Spacer()
+                Text("\(Int(metrics.value.inputLevel * 100))%")
+                    .monospacedDigit()
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct MetricColumn: View {
+    let rows: [(String, String)]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { row in
+                HStack {
+                    Text(row.element.0)
+                    Spacer()
+                    Text(row.element.1)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                .padding(.vertical, 10)
+                if row.offset < rows.count - 1 {
+                    Divider()
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 private struct BrandMark: View {
     let active: Bool
     let size: CGFloat
@@ -493,6 +519,7 @@ private struct BrandMark: View {
     var body: some View {
         Image(nsImage: image)
             .resizable()
+            .renderingMode(.template)
             .interpolation(.high)
             .antialiased(true)
             .scaledToFit()
@@ -508,9 +535,6 @@ private struct BrandMark: View {
         let source = NSImage(named: NSImage.Name(sizeSpecificName))
             ?? NSImage(named: NSImage.Name(fallbackName))
             ?? NSImage(systemSymbolName: "circle", accessibilityDescription: "Ech0")!
-        let copy = source.copy() as? NSImage ?? source
-        copy.isTemplate = true
-        copy.size = NSSize(width: size, height: size)
-        return copy
+        return source
     }
 }

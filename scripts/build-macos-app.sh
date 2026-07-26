@@ -5,6 +5,10 @@ repo_root="${0:A:h:h}"
 output_dir="$repo_root/dist/macos"
 app_dir="$output_dir/Ech0Mac.app"
 
+swift test \
+  --package-path "$repo_root/macos" \
+  -Xswiftc -warn-concurrency \
+  -Xswiftc -strict-concurrency=complete
 swift build --package-path "$repo_root/macos" -c release
 binary_dir="$(swift build --package-path "$repo_root/macos" -c release --show-bin-path)"
 
@@ -13,10 +17,13 @@ mkdir -p "$app_dir/Contents/MacOS"
 mkdir -p "$app_dir/Contents/Resources"
 cp "$binary_dir/Ech0Mac" "$app_dir/Contents/MacOS/Ech0Mac"
 cp "$repo_root/macos/Info.plist" "$app_dir/Contents/Info.plist"
-cp "$repo_root/macos/Resources/Ech0StatusIdleTemplate.png" "$app_dir/Contents/Resources/Ech0StatusIdleTemplate.png"
-cp "$repo_root/macos/Resources/Ech0StatusIdleTemplate@2x.png" "$app_dir/Contents/Resources/Ech0StatusIdleTemplate@2x.png"
-cp "$repo_root/macos/Resources/Ech0StatusActiveTemplate.png" "$app_dir/Contents/Resources/Ech0StatusActiveTemplate.png"
-cp "$repo_root/macos/Resources/Ech0StatusActiveTemplate@2x.png" "$app_dir/Contents/Resources/Ech0StatusActiveTemplate@2x.png"
+xcrun actool "$repo_root/macos/Resources/Ech0StatusAssets.xcassets" \
+  --compile "$app_dir/Contents/Resources" \
+  --platform macosx \
+  --minimum-deployment-target 13.0 \
+  --output-format human-readable-text \
+  --warnings \
+  --notices
 for asset in "$repo_root"/macos/Resources/Ech0Brand*.png; do
   cp "$asset" "$app_dir/Contents/Resources/"
 done
@@ -36,4 +43,6 @@ else
   codesign --force --deep --sign - "$app_dir"
 fi
 
+codesign --verify --deep --strict "$app_dir"
+plutil -lint "$app_dir/Contents/Info.plist"
 echo "$app_dir"

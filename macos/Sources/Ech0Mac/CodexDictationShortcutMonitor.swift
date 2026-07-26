@@ -29,14 +29,25 @@ struct DoubleCommandDetector {
     }
 }
 
-final class CodexDictationShortcutMonitor {
+final class CodexDictationShortcutMonitor: @unchecked Sendable {
     var onToggle: (() -> Void)?
 
     private let queue = DispatchQueue(label: "net.ech0.codex-dictation-shortcut")
+    private let queueKey = DispatchSpecificKey<Void>()
     private var detector = DoubleCommandDetector()
     private var timer: DispatchSourceTimer?
 
+    init() {
+        queue.setSpecific(key: queueKey, value: ())
+    }
+
     func start() {
+        syncOnQueue {
+            startOnQueue()
+        }
+    }
+
+    private func startOnQueue() {
         guard timer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(25), leeway: .milliseconds(5))
@@ -46,6 +57,12 @@ final class CodexDictationShortcutMonitor {
     }
 
     func stop() {
+        syncOnQueue {
+            stopOnQueue()
+        }
+    }
+
+    private func stopOnQueue() {
         timer?.cancel()
         timer = nil
     }
@@ -67,5 +84,16 @@ final class CodexDictationShortcutMonitor {
         )
         guard shouldToggle else { return }
         DispatchQueue.main.async { [weak self] in self?.onToggle?() }
+    }
+
+    var isRunning: Bool {
+        syncOnQueue { timer != nil }
+    }
+
+    private func syncOnQueue<T>(_ body: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return body()
+        }
+        return queue.sync(execute: body)
     }
 }

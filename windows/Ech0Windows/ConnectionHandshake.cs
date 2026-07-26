@@ -3,51 +3,71 @@ using System.Net.Sockets;
 namespace Ech0.Windows;
 
 internal sealed class PairingRequiredException(string reason) : Exception(reason);
+internal sealed record AuthenticatedConnection(SecureRecordStream Stream, ServerHello Hello);
 
 internal static class ConnectionHandshake
 {
-    public static async Task<ServerHello> ConnectAndAuthenticateAsync(
-        NetworkStream stream,
+    public static async Task<AuthenticatedConnection> ConnectAndAuthenticateAsync(
+        Stream rawStream,
         Ech0Settings settings,
         CancellationToken cancellationToken)
     {
-        var helloPacket = Ech0Protocol.EncodeControl(
-            new ClientHello(
-                "clientHello",
-                2,
-                settings.PairingToken,
-                settings.DeviceName,
-                settings.SenderId,
-                settings.TrustedSecret,
-                ["remoteCaptureControl"],
-                48_000,
-                1,
-                20));
-        await stream.WriteAsync(helloPacket, cancellationToken);
-        await stream.FlushAsync(cancellationToken);
-
-        var responsePacket = await Ech0Protocol.ReadPacketAsync(stream, cancellationToken);
-        if (responsePacket.Type != Ech0Protocol.ControlType
-            || Ech0Protocol.ReadKind(responsePacket.Payload) != "serverHello")
+        var transport = await SecureTransportClient.NegotiateAsync(
+            rawStream,
+            settings,
+            cancellationToken);
+        try
         {
-            throw new InvalidDataException("Expected serverHello.");
-        }
+            var helloPacket = Ech0Protocol.EncodeControl(
+                new ClientHello(
+                    "clientHello",
+                    SecureHandshake.ProtocolVersion,
+                    PairingCode.Normalize(settings.PairingToken) ?? "",
+                    settings.DeviceName,
+                    settings.SenderId,
+                    settings.TrustedSecret,
+                    ["remoteCaptureControl", SecureHandshake.Capability],
+                    48_000,
+                    1,
+                    20));
+            await transport.Stream.WriteAsync(helloPacket, cancellationToken);
+            await transport.Stream.FlushAsync(cancellationToken);
 
-        var hello = Ech0Protocol.DecodeControl<ServerHello>(responsePacket.Payload);
-        if (!hello.Accepted)
-        {
-            if (hello.Reason is "pairingRequired" or "trustRevoked" or "invalidToken")
+            var responsePacket = await Ech0Protocol.ReadPacketAsync(
+                transport.Stream,
+                cancellationToken);
+            if (responsePacket.Type != Ech0Protocol.ControlType
+                || Ech0Protocol.ReadKind(responsePacket.Payload) != "serverHello")
             {
-                throw new PairingRequiredException(hello.Reason);
+                throw new InvalidDataException("Expected serverHello.");
             }
-            throw new InvalidOperationException(hello.Reason ?? "Pairing rejected.");
+
+            var hello = Ech0Protocol.DecodeControl<ServerHello>(responsePacket.Payload);
+            if (!hello.Accepted)
+            {
+                if (hello.Reason is "pairingRequired" or "trustRevoked")
+                {
+                    throw new PairingRequiredException(hello.Reason);
+                }
+                throw new InvalidOperationException(hello.Reason ?? "Pairing rejected.");
+            }
+            if (hello.NegotiatedProtocolVersion != SecureHandshake.ProtocolVersion
+                || hello.Capabilities?.Contains("remoteCaptureControl") != true
+                || hello.Capabilities.Contains(SecureHandshake.Capability) != true
+                || !string.Equals(
+                    hello.ReceiverKeyHash,
+                    transport.ReceiverKeyHash,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Mac receiver did not complete secure transport negotiation.");
+            }
+            return new AuthenticatedConnection(transport.Stream, hello);
         }
-        if (hello.NegotiatedProtocolVersion != 2
-            || hello.Capabilities?.Contains("remoteCaptureControl") != true)
+        catch
         {
-            throw new InvalidOperationException("Mac receiver does not support remote capture control.");
+            await transport.Stream.DisposeAsync();
+            throw;
         }
-        return hello;
     }
 }
 
@@ -57,8 +77,12 @@ internal static class PairingProbe
     {
         using var client = new TcpClient { NoDelay = true };
         await client.ConnectAsync(candidate.Host, candidate.Port, cancellationToken);
-        await using var stream = client.GetStream();
-        var hello = await ConnectionHandshake.ConnectAndAuthenticateAsync(stream, candidate, cancellationToken);
+        var authenticated = await ConnectionHandshake.ConnectAndAuthenticateAsync(
+            client.GetStream(),
+            candidate,
+            cancellationToken);
+        await using var stream = authenticated.Stream;
+        var hello = authenticated.Hello;
         if (hello.TrustEstablished != true || string.IsNullOrWhiteSpace(hello.ReceiverId))
         {
             throw new InvalidOperationException("The Mac did not confirm the trusted relationship.");

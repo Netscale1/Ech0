@@ -15,7 +15,7 @@ Ech0Windows resta connesso ma apre il microfono Windows soltanto quando Ech0Mac 
 - Codex configurato per usare `BlackHole 2ch` come ingresso.
 - .NET 10 SDK soltanto sulla macchina che esegue la build Windows; il PC di destinazione non richiede .NET.
 
-Il protocollo, il pairing e l’audio non sono cifrati. Non esporre la porta `48484/TCP` su Internet: per un uso remoto futuro serve una VPN o TLS.
+Il protocollo v3 autentica il Mac, cifra pairing, controlli e audio con AES-GCM e salva su Windows il pin della chiave del ricevitore. Non esporre comunque la porta `48484/TCP` direttamente su Internet: il trasporto è progettato e verificato per la LAN locale.
 
 ## 1. Preparare il Mac
 
@@ -33,7 +33,7 @@ Lo script crea il bundle in `dist/macos/Ech0Mac.app`. Se nel portachiavi esiste 
 
 Al primo avvio:
 
-1. Aprire **Pairing** e annotare il codice a sei cifre per il nuovo dispositivo e l’indirizzo del Mac.
+1. Aprire **Pairing** e copiare il codice di sicurezza Base32 per il nuovo dispositivo e l’indirizzo del Mac.
 2. Abilitare **Launch at login** se Ech0Mac deve partire con macOS.
 3. Consentire Ech0Mac in **Impostazioni di Sistema → Privacy e sicurezza → Accessibilità**.
 4. Se macOS non aggiorna subito il permesso, chiudere e riaprire Ech0Mac.
@@ -43,17 +43,18 @@ Il permesso Accessibility serve solo a leggere la descrizione del controllo di d
 
 ## 2. Preparare Windows
 
-Per una build self-contained x64:
+Per una build self-contained x64 di sviluppo:
 
 ```sh
 ./scripts/build-windows.sh
 ```
 
-Gli artefatti sono:
+Lo script esegue prima tutti i test C# e produce:
 
-- `dist/windows/Ech0Windows-win-x64.zip`: prima installazione;
-- `dist/windows/Ech0Windows-update.zip`: aggiornamento con `Ech0Windows.exe` e `Update-Ech0.cmd`;
+- `dist/windows/Ech0Windows-win-x64.zip`: prima installazione non firmata per test;
 - `dist/windows/SHA256SUMS`: hash SHA-256.
+
+Una release distribuibile e il relativo `Ech0Windows-update.zip` devono essere creati su Windows con `scripts/release-windows.ps1`, un certificato Authenticode e un timestamp server configurati. Il gate esegue test, firma e verifica sia l’eseguibile sia lo script di update. I dettagli sono in `docs/release.md`.
 
 Sul PC Windows:
 
@@ -65,7 +66,7 @@ Sul PC Windows:
 
 La prima configurazione copia l’eseguibile in `%LOCALAPPDATA%\Ech0` e registra l’avvio per l’utente corrente in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Non servono UAC, driver o privilegi amministrativi.
 
-Per aggiornare un’installazione esistente, estrarre lo ZIP di update e avviare `Update-Ech0.cmd`. Lo script chiude l’agent corrente, sostituisce il binario e lo riavvia.
+Per aggiornare un’installazione esistente, usare soltanto lo ZIP prodotto dal percorso firmato, estrarlo e avviare `Update-Ech0.cmd`. L’updater verifica SHA-256, firma e publisher atteso; arresta soltanto il processo eseguito dal percorso installato in `%LOCALAPPDATA%\Ech0`, sostituisce il file e lo riavvia.
 
 ## 3. Discovery e pairing
 
@@ -73,9 +74,9 @@ Ech0Mac pubblica il servizio DNS-SD `_ech0._tcp.local`. Ech0Windows prova prima 
 
 - indirizzo IP del Mac;
 - porta `48484`;
-- codice di pairing a sei cifre.
+- codice di sicurezza Base32 mostrato dal Mac.
 
-Dopo il pairing, Windows conserva il `receiverId` stabile del Mac, un `senderId` e un segreto casuale. Segreto e codice eventualmente pendente vengono serializzati soltanto nei rispettivi campi protetti con DPAPI `CurrentUser`; sul Mac viene conservato soltanto l’hash del segreto. Il codice viene eliminato da Windows dopo la conferma e non deve corrispondere a quello mostrato in seguito dal Mac: un dispositivo trusted si riconnette usando la propria identità. Il primo salvataggio con la versione aggiornata rimuove anche eventuali proprietà credenziali in chiaro create dalle versioni precedenti.
+Dopo il pairing, Windows conserva il `receiverId`, il pin SHA-256 della chiave di firma del Mac, un `senderId` e un segreto casuale. Segreto e codice eventualmente pendente vengono serializzati soltanto nei rispettivi campi protetti con DPAPI `CurrentUser`; sul Mac viene conservato soltanto l’hash del segreto Windows e la chiave privata del ricevitore ha permessi owner-only. Il codice viene eliminato da Windows dopo la conferma. Una sessione trusted accetta soltanto lo stesso receiver ID e lo stesso pin; una vecchia associazione v2 priva di pin richiede intenzionalmente un nuovo pairing una tantum.
 
 Nelle impostazioni Windows, un Mac associato appare come `Connected · Trusted` oppure `Trusted · not reachable`; il campo del codice compare soltanto quando serve un nuovo pairing. **Change Mac** conserva l’associazione precedente finché il nuovo Mac non conferma la fiducia. **Reset pairing** elimina invece subito l’associazione locale.
 
@@ -151,4 +152,4 @@ Dopo il primo pairing Windows non deve mostrare alcun codice: il codice del Mac 
 - Nessun relay Internet o fallback cloud.
 - Nessuna registrazione locale dell’audio.
 - Nessuna modifica al microfono predefinito, volume, mute o modalità esclusiva Windows.
-- LAN fidata obbligatoria finché il protocollo non verrà protetto con TLS o VPN.
+- La porta TCP resta destinata alla LAN locale e non a un’esposizione Internet diretta.

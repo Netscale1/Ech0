@@ -9,13 +9,20 @@ internal sealed class SettingsForm : Form
     private readonly Func<Task> suspendConnection;
     private readonly TextBox host = new() { Dock = DockStyle.Fill };
     private readonly NumericUpDown port = new() { Minimum = 1, Maximum = 65_535, Value = 48_484, Dock = DockStyle.Fill };
-    private readonly TextBox token = new() { MaxLength = 6, Dock = DockStyle.Fill };
+    private readonly TextBox token = new()
+    {
+        MaxLength = 40,
+        CharacterCasing = CharacterCasing.Upper,
+        Dock = DockStyle.Fill,
+    };
     private readonly CheckBox launchAtLogin = new() { Text = "Start Ech0 with Windows", Checked = true, AutoSize = true };
     private readonly ComboBox inputDevice = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     private readonly Label discoveryStatus = new() { Text = "", AutoSize = true };
     private readonly Button discover = new() { Text = "Find Mac automatically", AutoSize = true };
     private readonly Button pair = new() { Text = "Pair", AutoSize = true };
+    private readonly CancellationTokenSource formLifetime = new();
     private bool changingMac;
+    private bool formLifetimeDisposed;
 
     public SettingsForm(Ech0Settings settings, AgentState currentState, Func<Task> suspendConnection)
     {
@@ -35,6 +42,23 @@ internal sealed class SettingsForm : Form
         launchAtLogin.Checked = settings.LaunchAtLogin;
         LoadInputDevices(settings.InputDeviceId);
         ShowCurrentMode();
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs eventArgs)
+    {
+        formLifetime.Cancel();
+        base.OnFormClosed(eventArgs);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && !formLifetimeDisposed)
+        {
+            formLifetimeDisposed = true;
+            formLifetime.Cancel();
+            formLifetime.Dispose();
+        }
+        base.Dispose(disposing);
     }
 
     private void ShowCurrentMode()
@@ -86,7 +110,7 @@ internal sealed class SettingsForm : Form
         token.Text = "";
         discoveryStatus.Text = changingMac
             ? "The current trusted Mac remains saved until the new pairing succeeds."
-            : "The six-digit code is only used for this first pairing.";
+            : "The security code is only used for this first encrypted pairing.";
 
         var layout = CreateLayout();
         var title = new Label
@@ -137,9 +161,23 @@ internal sealed class SettingsForm : Form
 
     private async Task BeginChangeMacAsync()
     {
-        await suspendConnection();
-        changingMac = true;
-        ShowCurrentMode();
+        try
+        {
+            await suspendConnection().WaitAsync(formLifetime.Token);
+            changingMac = true;
+            ShowCurrentMode();
+        }
+        catch (OperationCanceledException) when (formLifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            Log.Write("change_mac_failed", exception.GetType().Name);
+            if (!IsDisposed && !Disposing)
+            {
+                MessageBox.Show(this, "Ech0 could not suspend the current connection.", "Ech0", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
     }
 
     private async Task ResetPairingAsync()
@@ -155,32 +193,51 @@ internal sealed class SettingsForm : Form
             return;
         }
 
-        await suspendConnection();
-        settings.ResetAssociation();
-        SettingsStore.Save(settings);
-        changingMac = false;
-        ShowCurrentMode();
+        try
+        {
+            await suspendConnection().WaitAsync(formLifetime.Token);
+            settings.ResetAssociation();
+            SettingsStore.Save(settings);
+            changingMac = false;
+            ShowCurrentMode();
+        }
+        catch (OperationCanceledException) when (formLifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            Log.Write("reset_pairing_failed", exception.GetType().Name);
+            if (!IsDisposed && !Disposing)
+            {
+                MessageBox.Show(this, "Ech0 could not reset pairing.", "Ech0", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
     }
 
     private async Task PairAsync()
     {
-        if (string.IsNullOrWhiteSpace(host.Text) || token.Text.Length != 6 || !token.Text.All(char.IsDigit))
+        var pairingCode = PairingCode.Normalize(token.Text);
+        if (string.IsNullOrWhiteSpace(host.Text) || pairingCode is null)
         {
-            MessageBox.Show(this, "Enter a Mac host and its current six-digit code.", "Ech0", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "Enter a Mac host and its current security code.", "Ech0", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
         pair.Enabled = false;
         discover.Enabled = false;
         discoveryStatus.Text = "Pairing securely on the local network…";
-        await suspendConnection();
-
-        var candidate = settings.CreatePairingCandidate(host.Text.Trim(), (int)port.Value, token.Text);
-        candidate.InputDeviceId = SelectedInputDeviceId();
-        candidate.LaunchAtLogin = launchAtLogin.Checked;
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            await suspendConnection().WaitAsync(formLifetime.Token);
+            var candidate = settings.CreatePairingCandidate(
+                host.Text.Trim(),
+                (int)port.Value,
+                pairingCode);
+            candidate.InputDeviceId = SelectedInputDeviceId();
+            candidate.LaunchAtLogin = launchAtLogin.Checked;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                formLifetime.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(8));
             var hello = await PairingProbe.PairAsync(candidate, timeout.Token);
             if (!candidate.TryCompleteTrust(hello))
             {
@@ -191,9 +248,16 @@ internal sealed class SettingsForm : Form
             DialogResult = DialogResult.OK;
             Close();
         }
+        catch (OperationCanceledException) when (formLifetime.IsCancellationRequested)
+        {
+        }
         catch (Exception exception)
         {
             Log.Write("pairing_failed", exception.GetType().Name);
+            if (IsDisposed || Disposing)
+            {
+                return;
+            }
             discoveryStatus.Text = exception is PairingRequiredException
                 ? "The code was rejected. Generate or copy the current code from the Mac."
                 : $"Pairing failed: {exception.GetType().Name}";
@@ -205,10 +269,13 @@ internal sealed class SettingsForm : Form
     private async Task DiscoverAsync()
     {
         discover.Enabled = false;
+        pair.Enabled = false;
         discoveryStatus.Text = "Searching on the local network…";
         try
         {
-            var result = await DnsSdDiscovery.FindFirstAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+            var result = await DnsSdDiscovery.FindFirstAsync(
+                TimeSpan.FromSeconds(5),
+                formLifetime.Token);
             if (result is null)
             {
                 discoveryStatus.Text = "Mac not found. Enter its IP address manually.";
@@ -218,24 +285,42 @@ internal sealed class SettingsForm : Form
             port.Value = result.Port;
             discoveryStatus.Text = $"Found {result.InstanceName}";
         }
+        catch (OperationCanceledException) when (formLifetime.IsCancellationRequested)
+        {
+        }
         catch (Exception exception)
         {
-            discoveryStatus.Text = $"Discovery unavailable: {exception.GetType().Name}";
+            if (!IsDisposed && !Disposing)
+            {
+                discoveryStatus.Text = $"Discovery unavailable: {exception.GetType().Name}";
+            }
         }
         finally
         {
-            discover.Enabled = true;
+            if (!IsDisposed && !Disposing)
+            {
+                discover.Enabled = true;
+                pair.Enabled = true;
+            }
         }
     }
 
     private void SaveTrustedPreferences()
     {
-        settings.InputDeviceId = SelectedInputDeviceId();
-        settings.LaunchAtLogin = launchAtLogin.Checked;
-        SettingsStore.Save(settings);
-        AutoStartManager.Configure(settings.LaunchAtLogin);
-        DialogResult = DialogResult.OK;
-        Close();
+        try
+        {
+            settings.InputDeviceId = SelectedInputDeviceId();
+            settings.LaunchAtLogin = launchAtLogin.Checked;
+            SettingsStore.Save(settings);
+            AutoStartManager.Configure(settings.LaunchAtLogin);
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+        catch (Exception exception)
+        {
+            Log.Write("settings_save_failed", exception.GetType().Name);
+            MessageBox.Show(this, "Ech0 could not save these settings.", "Ech0", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private string SelectedInputDeviceId()
@@ -268,7 +353,10 @@ internal sealed class SettingsForm : Form
             using var enumerator = new MMDeviceEnumerator();
             foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active | DeviceState.Unplugged))
             {
-                inputDevice.Items.Add(new InputDeviceChoice(device.ID, device.FriendlyName));
+                using (device)
+                {
+                    inputDevice.Items.Add(new InputDeviceChoice(device.ID, device.FriendlyName));
+                }
             }
         }
         catch (Exception exception)

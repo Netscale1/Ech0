@@ -1,11 +1,11 @@
 import Foundation
 
-private struct ControlKindProbe: Codable {
+private struct ControlKindProbe: Codable, Sendable {
     let kind: String
 }
 
-struct ClientHello: Codable {
-    let kind = "clientHello"
+struct ClientHello: Codable, Sendable {
+    private(set) var kind = "clientHello"
     let protocolVersion: Int
     let token: String
     let deviceName: String
@@ -17,8 +17,30 @@ struct ClientHello: Codable {
     let frameMs: Int
 }
 
-struct ServerHello: Codable {
-    let kind = "serverHello"
+struct KeyExchangeClientHello: Codable, Sendable {
+    private(set) var kind = "keyExchangeClientHello"
+    let protocolVersion: Int
+    let authMode: String
+    let clientEphemeralPublicKey: String
+    let clientNonce: String
+    let expectedReceiverId: String?
+    let expectedReceiverKeyHash: String?
+}
+
+struct KeyExchangeServerHello: Codable, Sendable {
+    private(set) var kind = "keyExchangeServerHello"
+    let accepted: Bool
+    let reason: String?
+    let receiverId: String?
+    let serverSigningPublicKey: String?
+    let serverEphemeralPublicKey: String?
+    let serverNonce: String?
+    let signature: String?
+    let pairingProof: String?
+}
+
+struct ServerHello: Codable, Sendable {
+    private(set) var kind = "serverHello"
     let accepted: Bool
     let reason: String?
     let targetBufferMs: Int
@@ -26,39 +48,42 @@ struct ServerHello: Codable {
     let capabilities: [String]?
     let receiverId: String?
     let receiverName: String?
+    let receiverKeyHash: String?
     let authentication: String?
     let trustEstablished: Bool?
 }
 
-struct CaptureDemand: Codable {
-    let kind = "captureDemand"
+struct CaptureDemand: Codable, Sendable {
+    private(set) var kind = "captureDemand"
     let active: Bool
     let generation: UInt64
 }
 
-struct CaptureStatus: Codable {
-    let kind = "captureStatus"
+struct CaptureStatus: Codable, Sendable {
+    private(set) var kind = "captureStatus"
     let generation: UInt64
     let state: String
     let errorCode: String?
 }
 
-struct PingMessage: Codable {
-    let kind = "ping"
+struct PingMessage: Codable, Sendable {
+    private(set) var kind = "ping"
     let monotonicMs: UInt64
 }
 
-struct PongMessage: Codable {
-    let kind = "pong"
+struct PongMessage: Codable, Sendable {
+    private(set) var kind = "pong"
     let monotonicMs: UInt64
 }
 
-struct StopMessage: Codable {
-    let kind = "stop"
+struct StopMessage: Codable, Sendable {
+    private(set) var kind = "stop"
     let reason: String
 }
 
-enum ControlMessage {
+enum ControlMessage: Sendable {
+    case keyExchangeClientHello(KeyExchangeClientHello)
+    case keyExchangeServerHello(KeyExchangeServerHello)
     case clientHello(ClientHello)
     case serverHello(ServerHello)
     case ping(PingMessage)
@@ -74,6 +99,10 @@ enum ControlMessageCodec {
 
     static func encode(_ message: ControlMessage) throws -> Data {
         switch message {
+        case .keyExchangeClientHello(let value):
+            return try encoder.encode(value)
+        case .keyExchangeServerHello(let value):
+            return try encoder.encode(value)
         case .clientHello(let value):
             return try encoder.encode(value)
         case .serverHello(let value):
@@ -94,6 +123,14 @@ enum ControlMessageCodec {
     static func decode(_ data: Data) throws -> ControlMessage {
         let probe = try decoder.decode(ControlKindProbe.self, from: data)
         switch probe.kind {
+        case "keyExchangeClientHello":
+            return .keyExchangeClientHello(
+                try decoder.decode(KeyExchangeClientHello.self, from: data)
+            )
+        case "keyExchangeServerHello":
+            return .keyExchangeServerHello(
+                try decoder.decode(KeyExchangeServerHello.self, from: data)
+            )
         case "clientHello":
             return .clientHello(try decoder.decode(ClientHello.self, from: data))
         case "serverHello":

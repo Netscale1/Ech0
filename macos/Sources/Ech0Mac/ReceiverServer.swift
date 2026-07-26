@@ -6,18 +6,33 @@ struct ReceiverAuthenticationDecision: Equatable {
     let authentication: String?
     let rejectionReason: String?
 
-    static func evaluate(protocolVersion: Int, tokenMatches: Bool, trustedIdentityMatches: Bool) -> Self {
-        if trustedIdentityMatches {
+    static func evaluate(
+        authenticationMode: SecureHandshake.AuthenticationMode,
+        tokenMatches: Bool,
+        trustedIdentityMatches: Bool
+    ) -> Self {
+        switch authenticationMode {
+        case .trusted where trustedIdentityMatches:
             return Self(accepted: true, authentication: "trusted", rejectionReason: nil)
-        }
-        if tokenMatches {
+        case .pairing where tokenMatches:
             return Self(accepted: true, authentication: "pairing", rejectionReason: nil)
+        default:
+            return Self(
+                accepted: false,
+                authentication: nil,
+                rejectionReason: "pairingRequired"
+            )
         }
-        return Self(
-            accepted: false,
-            authentication: nil,
-            rejectionReason: protocolVersion >= 2 ? "pairingRequired" : "invalidToken"
-        )
+    }
+}
+
+struct ReceiverTrustEstablishment {
+    static func succeeds(
+        trustedIdentityMatches: Bool,
+        tokenMatches: Bool,
+        pairingWasPersisted: Bool
+    ) -> Bool {
+        trustedIdentityMatches || (tokenMatches && pairingWasPersisted)
     }
 }
 
@@ -38,7 +53,63 @@ struct ReceiverConnectionLiveness {
     }
 }
 
-final class ReceiverServer {
+struct ReceiverCallbackGeneration {
+    static func accepts(callbackGeneration: UInt64, currentGeneration: UInt64) -> Bool {
+        callbackGeneration == currentGeneration
+    }
+}
+
+enum CompletionSequence {
+    static func run<Item: Sendable>(
+        _ items: [Item],
+        at index: Int = 0,
+        send: @escaping @Sendable (Item, @escaping @Sendable (Error?) -> Void) -> Void,
+        completion: @escaping @Sendable (Error?) -> Void
+    ) {
+        guard index < items.count else {
+            completion(nil)
+            return
+        }
+        send(items[index]) { error in
+            guard error == nil else {
+                completion(error)
+                return
+            }
+            run(
+                items,
+                at: index + 1,
+                send: send,
+                completion: completion
+            )
+        }
+    }
+}
+
+struct ReceiverCaptureGate {
+    static func acceptsAudio(demandActive: Bool) -> Bool {
+        demandActive
+    }
+
+    static func acceptsStatus(generation: UInt64, currentGeneration: UInt64) -> Bool {
+        generation == currentGeneration
+    }
+}
+
+struct ReceiverProtocolSupport {
+    static func rejectionReason(protocolVersion: Int, capabilities: [String]?) -> String? {
+        guard protocolVersion == SecureHandshake.protocolVersion else {
+            return "unsupportedProtocol"
+        }
+        let capabilities = capabilities ?? []
+        guard capabilities.contains("remoteCaptureControl"),
+              capabilities.contains(SecureHandshake.capability) else {
+            return "unsupportedCapabilities"
+        }
+        return nil
+    }
+}
+
+final class ReceiverServer: @unchecked Sendable {
     enum ConnectionState: Equatable {
         case idle
         case listening(port: UInt16)
@@ -46,14 +117,24 @@ final class ReceiverServer {
         case connected(deviceName: String, senderId: String?)
     }
 
-    private final class ConnectionContext {
+    private final class ConnectionContext: @unchecked Sendable {
         let acceptedAt = ProcessInfo.processInfo.systemUptime
+        let peer: String
         var didHandshake = false
         var deviceName = ""
         var senderId: String?
-        var protocolVersion = 1
-        var supportsRemoteCaptureControl = false
         var lastPingAt: TimeInterval?
+        var secureSession: SecureRecordSession?
+        var authenticationMode: SecureHandshake.AuthenticationMode?
+        var receiverKeyHash: String?
+
+        init(peer: String) {
+            self.peer = peer
+        }
+    }
+
+    private final class ReceiveBuffer: @unchecked Sendable {
+        var data = Data()
     }
 
     var onAudioFrame: ((AudioFrame) -> Void)?
@@ -64,13 +145,17 @@ final class ReceiverServer {
     var onCaptureStatus: ((CaptureStatus) -> Void)?
 
     private let queue = DispatchQueue(label: "net.ech0.receiver.server")
+    private let queueKey = DispatchSpecificKey<Void>()
     private let targetBufferMs: Int
     private let connectionTimeout: TimeInterval
     private let port: UInt16
     private let receiverId: String
     private let receiverName: String
+    private let signingPrivateKey: Data
     private var expectedToken: String
+    private var pairingAttemptLimiter = PairingAttemptLimiter()
     private var listener: NWListener?
+    private var listenerGeneration: UInt64 = 0
     private var livenessTimer: DispatchSourceTimer?
     private var activeConnection: NWConnection?
     private var activeContext: ConnectionContext?
@@ -82,6 +167,7 @@ final class ReceiverServer {
         token: String,
         receiverId: String,
         receiverName: String,
+        signingPrivateKey: Data,
         targetBufferMs: Int = 60,
         connectionTimeout: TimeInterval = 5
     ) {
@@ -89,8 +175,10 @@ final class ReceiverServer {
         self.expectedToken = token
         self.receiverId = receiverId
         self.receiverName = receiverName
+        self.signingPrivateKey = signingPrivateKey
         self.targetBufferMs = targetBufferMs
         self.connectionTimeout = connectionTimeout
+        queue.setSpecific(key: queueKey, value: ())
     }
 
     func updateToken(_ token: String) {
@@ -107,14 +195,21 @@ final class ReceiverServer {
                 context.senderId == id
             else { return }
 
-            self.sendControl(.stop(StopMessage(reason: "trustRevoked")), on: connection)
-            self.queue.asyncAfter(deadline: .now() + 0.1) {
-                self.handleDisconnect(connection: connection, reason: "trustRevoked")
-            }
+            self.sendControlsAndDisconnect(
+                [.stop(StopMessage(reason: "trustRevoked"))],
+                connection: connection,
+                reason: "trustRevoked"
+            )
         }
     }
 
     func start() throws {
+        try syncOnQueue {
+            try startOnQueue()
+        }
+    }
+
+    private func startOnQueue() throws {
         if listener != nil {
             throw ReceiverError.listenerAlreadyRunning
         }
@@ -135,14 +230,19 @@ final class ReceiverServer {
             type: "_ech0._tcp"
         )
 
+        listenerGeneration &+= 1
+        let generation = listenerGeneration
         listener = newListener
-        newListener.stateUpdateHandler = { [weak self] state in
-            self?.handleListenerState(state)
+        newListener.stateUpdateHandler = { [weak self, weak newListener] state in
+            guard let newListener else { return }
+            self?.handleListenerState(
+                state,
+                listener: newListener,
+                generation: generation
+            )
         }
         newListener.newConnectionHandler = { [weak self] connection in
-            self?.queue.async {
-                self?.accept(connection)
-            }
+            self?.accept(connection)
         }
         newListener.start(queue: queue)
         startLivenessTimer()
@@ -151,28 +251,46 @@ final class ReceiverServer {
     }
 
     func stop() {
-        queue.sync {
+        syncOnQueue {
+            listenerGeneration &+= 1
             livenessTimer?.cancel()
             livenessTimer = nil
             activeConnection?.stateUpdateHandler = nil
             activeConnection?.cancel()
             activeConnection = nil
             activeContext = nil
+            listener?.stateUpdateHandler = nil
+            listener?.newConnectionHandler = nil
             listener?.cancel()
             listener = nil
         }
         onStateChange?(.idle)
     }
 
-    private func handleListenerState(_ state: NWListener.State) {
+    private func handleListenerState(
+        _ state: NWListener.State,
+        listener sourceListener: NWListener,
+        generation: UInt64
+    ) {
+        guard
+            listener === sourceListener,
+            ReceiverCallbackGeneration.accepts(
+                callbackGeneration: generation,
+                currentGeneration: listenerGeneration
+            )
+        else { return }
+
         switch state {
         case .ready:
             onStateChange?(.listening(port: port))
         case .failed(let error):
             onLog?("Listener failed: \(error.localizedDescription)")
+            listenerGeneration &+= 1
             livenessTimer?.cancel()
             livenessTimer = nil
-            listener?.cancel()
+            sourceListener.stateUpdateHandler = nil
+            sourceListener.newConnectionHandler = nil
+            sourceListener.cancel()
             listener = nil
             onStateChange?(.idle)
         default:
@@ -189,7 +307,7 @@ final class ReceiverServer {
         }
 
         activeConnection = connection
-        let context = ConnectionContext()
+        let context = ConnectionContext(peer: peerIdentifier(for: connection))
         activeContext = context
 
         connection.stateUpdateHandler = { [weak self, weak connection] state in
@@ -221,6 +339,18 @@ final class ReceiverServer {
     }
 
     private func receiveNext(on connection: NWConnection, context: ConnectionContext) {
+        if let secureSession = context.secureSession {
+            receiveSecureRecord(
+                on: connection,
+                context: context,
+                secureSession: secureSession
+            )
+        } else {
+            receivePlainPacket(on: connection, context: context)
+        }
+    }
+
+    private func receivePlainPacket(on connection: NWConnection, context: ConnectionContext) {
         receiveExact(on: connection, length: 5) { [weak self] result in
             guard let self else { return }
             guard self.activeConnection === connection else { return }
@@ -266,6 +396,74 @@ final class ReceiverServer {
         }
     }
 
+    private func receiveSecureRecord(
+        on connection: NWConnection,
+        context: ConnectionContext,
+        secureSession: SecureRecordSession
+    ) {
+        receiveExact(on: connection, length: SecureRecordSession.headerLength) { [weak self] result in
+            guard let self else { return }
+            guard self.activeConnection === connection else { return }
+
+            switch result {
+            case .failure(let error):
+                self.handleDisconnect(connection: connection, reason: error.localizedDescription)
+
+            case .success(let header):
+                do {
+                    let bodyLength = try secureSession.bodyLength(forHeader: header)
+                    self.receiveExact(on: connection, length: bodyLength) { [weak self] result in
+                        guard let self else { return }
+                        guard self.activeConnection === connection else { return }
+
+                        do {
+                            let body = try result.get()
+                            let packet = try secureSession.open(header + body)
+                            try self.processEncodedPacket(
+                                packet,
+                                on: connection,
+                                context: context
+                            )
+                            if self.activeConnection === connection {
+                                self.receiveNext(on: connection, context: context)
+                            }
+                        } catch {
+                            self.handleDisconnect(
+                                connection: connection,
+                                reason: error.localizedDescription
+                            )
+                        }
+                    }
+                } catch {
+                    self.handleDisconnect(connection: connection, reason: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func processEncodedPacket(
+        _ packet: Data,
+        on connection: NWConnection,
+        context: ConnectionContext
+    ) throws {
+        guard packet.count >= 5 else {
+            throw SecureTransportError.invalidRecord
+        }
+        let type = packet[packet.startIndex]
+        let length = Int(packet.readUInt32BE(at: 1))
+        guard length == packet.count - 5,
+              length <= PacketCodec.maximumPayloadSize,
+              type != PacketCodec.controlType || length <= PacketCodec.maximumControlPayloadSize else {
+            throw SecureTransportError.invalidRecord
+        }
+        processPacket(
+            type: type,
+            payload: packet.subdata(in: 5..<packet.count),
+            on: connection,
+            context: context
+        )
+    }
+
     private func processPacket(
         type: UInt8,
         payload: Data,
@@ -281,6 +479,11 @@ final class ReceiverServer {
             case PacketCodec.audioType:
                 guard context.didHandshake else {
                     reject(connection: connection, reason: "audioBeforeHandshake")
+                    return
+                }
+                guard ReceiverCaptureGate.acceptsAudio(
+                    demandActive: captureDemandActive
+                ) else {
                     return
                 }
                 let frame = try PacketCodec.decodeAudioFrame(payload)
@@ -299,21 +502,52 @@ final class ReceiverServer {
         on connection: NWConnection,
         context: ConnectionContext
     ) {
+        guard context.secureSession != nil else {
+            if case .keyExchangeClientHello(let hello) = message {
+                handleKeyExchange(hello, on: connection, context: context)
+            } else {
+                handleDisconnect(connection: connection, reason: "secureHandshakeRequired")
+            }
+            return
+        }
+
         switch message {
         case .clientHello(let hello):
-            guard hello.protocolVersion == 1 || hello.protocolVersion == 2 else {
-                reject(connection: connection, reason: "unsupportedProtocol")
+            guard !context.didHandshake,
+                  let authenticationMode = context.authenticationMode else {
+                reject(connection: connection, reason: "unexpectedClientHello")
                 return
             }
-            let acceptedByToken = hello.token == expectedToken
-            let acceptedByTrustedIdentity = authenticateTrustedSender?(hello) ?? false
-            let authenticationDecision = ReceiverAuthenticationDecision.evaluate(
+            if let reason = ReceiverProtocolSupport.rejectionReason(
                 protocolVersion: hello.protocolVersion,
+                capabilities: hello.capabilities
+            ) {
+                reject(connection: connection, reason: reason)
+                return
+            }
+            let expectedNormalizedToken = PairingCode.normalize(expectedToken)
+            let presentedNormalizedToken = PairingCode.normalize(hello.token)
+            let acceptedByToken: Bool
+            if authenticationMode == .pairing,
+               let expectedNormalizedToken,
+               let presentedNormalizedToken {
+                acceptedByToken = SecureHandshake.constantTimeEquals(
+                    Data(expectedNormalizedToken.utf8),
+                    Data(presentedNormalizedToken.utf8)
+                )
+            } else {
+                acceptedByToken = false
+            }
+            let acceptedByTrustedIdentity = authenticationMode == .trusted
+                && hello.token.isEmpty
+                && (authenticateTrustedSender?(hello) ?? false)
+            let authenticationDecision = ReceiverAuthenticationDecision.evaluate(
+                authenticationMode: authenticationMode,
                 tokenMatches: acceptedByToken,
                 trustedIdentityMatches: acceptedByTrustedIdentity
             )
             guard authenticationDecision.accepted else {
-                reject(connection: connection, reason: authenticationDecision.rejectionReason ?? "invalidToken")
+                reject(connection: connection, reason: authenticationDecision.rejectionReason ?? "pairingRequired")
                 return
             }
             guard hello.sampleRate == 48_000, hello.channels == 1, hello.frameMs == 20 else {
@@ -321,15 +555,24 @@ final class ReceiverServer {
                 return
             }
 
+            let pairingWasPersisted = acceptedByToken
+                && (trustSenderFromPairing?(hello) ?? false)
+            guard ReceiverTrustEstablishment.succeeds(
+                trustedIdentityMatches: acceptedByTrustedIdentity,
+                tokenMatches: acceptedByToken,
+                pairingWasPersisted: pairingWasPersisted
+            ) else {
+                reject(connection: connection, reason: "trustEstablishmentFailed")
+                return
+            }
+            if authenticationMode == .pairing {
+                pairingAttemptLimiter.reset(peer: context.peer)
+            }
             context.didHandshake = true
             context.lastPingAt = ProcessInfo.processInfo.systemUptime
             context.deviceName = hello.deviceName
             context.senderId = hello.senderId
-            context.protocolVersion = hello.protocolVersion
-            context.supportsRemoteCaptureControl = hello.protocolVersion >= 2
-                && (hello.capabilities ?? []).contains("remoteCaptureControl")
-            let trustEstablished = acceptedByTrustedIdentity
-                || (acceptedByToken && (trustSenderFromPairing?(hello) ?? false))
+            let trustEstablished = true
             let authentication = authenticationDecision.authentication ?? "pairing"
             sendControl(
                 .serverHello(
@@ -337,12 +580,13 @@ final class ReceiverServer {
                         accepted: true,
                         reason: nil,
                         targetBufferMs: targetBufferMs,
-                        negotiatedProtocolVersion: hello.protocolVersion,
-                        capabilities: context.supportsRemoteCaptureControl ? ["remoteCaptureControl"] : [],
-                        receiverId: hello.protocolVersion >= 2 ? receiverId : nil,
-                        receiverName: hello.protocolVersion >= 2 ? receiverName : nil,
-                        authentication: hello.protocolVersion >= 2 ? authentication : nil,
-                        trustEstablished: hello.protocolVersion >= 2 ? trustEstablished : nil
+                        negotiatedProtocolVersion: SecureHandshake.protocolVersion,
+                        capabilities: ["remoteCaptureControl", SecureHandshake.capability],
+                        receiverId: receiverId,
+                        receiverName: receiverName,
+                        receiverKeyHash: context.receiverKeyHash,
+                        authentication: authentication,
+                        trustEstablished: trustEstablished
                     )
                 ),
                 on: connection
@@ -350,28 +594,75 @@ final class ReceiverServer {
             let authMode = acceptedByTrustedIdentity ? "trusted device" : "pairing token"
             onLog?("Accepted sender \(hello.deviceName) via \(authMode).")
             onStateChange?(.connected(deviceName: hello.deviceName, senderId: hello.senderId))
-            sendCurrentCaptureDemandIfSupported(on: connection, context: context)
+            sendCurrentCaptureDemand(on: connection)
 
         case .ping(let ping):
+            guard context.didHandshake else {
+                reject(connection: connection, reason: "handshakeRequired")
+                return
+            }
             context.lastPingAt = ProcessInfo.processInfo.systemUptime
             sendControl(.pong(PongMessage(monotonicMs: ping.monotonicMs)), on: connection)
 
         case .stop(let stop):
+            guard context.didHandshake else {
+                reject(connection: connection, reason: "handshakeRequired")
+                return
+            }
             onLog?("Sender stopped session: \(stop.reason)")
             handleDisconnect(connection: connection, reason: stop.reason)
 
         case .captureStatus(let status):
-            guard context.supportsRemoteCaptureControl else { return }
+            guard context.didHandshake else {
+                reject(connection: connection, reason: "handshakeRequired")
+                return
+            }
+            guard ReceiverCaptureGate.acceptsStatus(
+                generation: status.generation,
+                currentGeneration: captureDemandGeneration
+            ) else { return }
             onCaptureStatus?(status)
 
-        case .serverHello, .pong, .captureDemand:
-            break
+        case .keyExchangeClientHello, .keyExchangeServerHello,
+             .serverHello, .pong, .captureDemand:
+            reject(connection: connection, reason: "unexpectedControlMessage")
+        }
+    }
+
+    private func handleKeyExchange(
+        _ hello: KeyExchangeClientHello,
+        on connection: NWConnection,
+        context: ConnectionContext
+    ) {
+        if hello.authMode == SecureHandshake.AuthenticationMode.pairing.rawValue,
+           !pairingAttemptLimiter.registerAttempt(
+                peer: context.peer,
+                now: ProcessInfo.processInfo.systemUptime
+           ) {
+            sendPlainRejection(on: connection, reason: "rateLimited")
+            return
+        }
+
+        do {
+            let result = try SecureServerKeyExchange.accept(
+                hello,
+                receiverId: receiverId,
+                signingPrivateKeyData: signingPrivateKey,
+                pairingCode: expectedToken
+            )
+            context.secureSession = result.session
+            context.authenticationMode = result.authenticationMode
+            context.receiverKeyHash = result.receiverKeyHash
+            sendPlainControl(.keyExchangeServerHello(result.response), on: connection)
+        } catch {
+            sendPlainRejection(on: connection, reason: "secureHandshakeRejected")
         }
     }
 
     private func reject(connection: NWConnection, reason: String) {
-        sendControl(
-            .serverHello(
+        sendControlsAndDisconnect(
+            [
+                .serverHello(
                 ServerHello(
                         accepted: false,
                         reason: reason,
@@ -380,19 +671,47 @@ final class ReceiverServer {
                         capabilities: nil,
                         receiverId: nil,
                         receiverName: nil,
+                        receiverKeyHash: nil,
                         authentication: nil,
                         trustEstablished: nil
-                )
-            ),
-            on: connection
+                )),
+                .stop(StopMessage(reason: reason)),
+            ],
+            connection: connection,
+            reason: reason
         )
-        sendControl(.stop(StopMessage(reason: reason)), on: connection)
-        queue.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.handleDisconnect(connection: connection, reason: reason)
+    }
+
+    private func sendControl(
+        _ message: ControlMessage,
+        on connection: NWConnection,
+        completion: (@Sendable (Error?) -> Void)? = nil
+    ) {
+        do {
+            guard activeConnection === connection,
+                  let secureSession = activeContext?.secureSession else {
+                throw SecureTransportError.invalidHandshake
+            }
+            let payload = try ControlMessageCodec.encode(message)
+            let packet = PacketCodec.encodePacket(type: PacketCodec.controlType, payload: payload)
+            let record = try secureSession.seal(packet)
+            connection.send(content: record, completion: .contentProcessed { [weak self] error in
+                if let error {
+                    self?.handleDisconnect(connection: connection, reason: error.localizedDescription)
+                }
+                completion?(error)
+            })
+        } catch {
+            handleDisconnect(connection: connection, reason: error.localizedDescription)
+            completion?(error)
         }
     }
 
-    private func sendControl(_ message: ControlMessage, on connection: NWConnection) {
+    private func sendPlainControl(
+        _ message: ControlMessage,
+        on connection: NWConnection,
+        completion: (@Sendable (Error?) -> Void)? = nil
+    ) {
         do {
             let payload = try ControlMessageCodec.encode(message)
             let packet = PacketCodec.encodePacket(type: PacketCodec.controlType, payload: payload)
@@ -400,10 +719,62 @@ final class ReceiverServer {
                 if let error {
                     self?.handleDisconnect(connection: connection, reason: error.localizedDescription)
                 }
+                completion?(error)
             })
         } catch {
             handleDisconnect(connection: connection, reason: error.localizedDescription)
+            completion?(error)
         }
+    }
+
+    private func sendPlainRejection(on connection: NWConnection, reason: String) {
+        queue.asyncAfter(deadline: .now() + 1) { [weak self, weak connection] in
+            guard let connection else { return }
+            self?.handleDisconnect(connection: connection, reason: reason)
+        }
+        sendPlainControl(
+            .keyExchangeServerHello(
+                KeyExchangeServerHello(
+                    accepted: false,
+                    reason: reason,
+                    receiverId: nil,
+                    serverSigningPublicKey: nil,
+                    serverEphemeralPublicKey: nil,
+                    serverNonce: nil,
+                    signature: nil,
+                    pairingProof: nil
+                )
+            ),
+            on: connection
+        ) { [weak self, weak connection] error in
+            guard error == nil, let connection else { return }
+            self?.handleDisconnect(connection: connection, reason: reason)
+        }
+    }
+
+    private func sendControlsAndDisconnect(
+        _ messages: [ControlMessage],
+        connection: NWConnection,
+        reason: String
+    ) {
+        queue.asyncAfter(deadline: .now() + 1) { [weak self, weak connection] in
+            guard let connection else { return }
+            self?.handleDisconnect(connection: connection, reason: reason)
+        }
+        CompletionSequence.run(
+            messages,
+            send: { [weak self, weak connection] message, completion in
+                guard let self, let connection, self.activeConnection === connection else {
+                    completion(ReceiverError.connectionClosed)
+                    return
+                }
+                self.sendControl(message, on: connection, completion: completion)
+            },
+            completion: { [weak self, weak connection] error in
+                guard error == nil, let connection else { return }
+                self?.handleDisconnect(connection: connection, reason: reason)
+            }
+        )
     }
 
     func updateCaptureDemand(active: Bool) {
@@ -411,13 +782,12 @@ final class ReceiverServer {
             guard self.captureDemandActive != active else { return }
             self.captureDemandActive = active
             self.captureDemandGeneration &+= 1
-            guard let connection = self.activeConnection, let context = self.activeContext else { return }
-            self.sendCurrentCaptureDemandIfSupported(on: connection, context: context)
+            guard let connection = self.activeConnection else { return }
+            self.sendCurrentCaptureDemand(on: connection)
         }
     }
 
-    private func sendCurrentCaptureDemandIfSupported(on connection: NWConnection, context: ConnectionContext) {
-        guard context.supportsRemoteCaptureControl else { return }
+    private func sendCurrentCaptureDemand(on connection: NWConnection) {
         sendControl(
             .captureDemand(
                 CaptureDemand(active: captureDemandActive, generation: captureDemandGeneration)
@@ -429,28 +799,31 @@ final class ReceiverServer {
     private func receiveExact(
         on connection: NWConnection,
         length: Int,
-        completion: @escaping (Result<Data, Error>) -> Void
+        completion: @escaping @Sendable (Result<Data, Error>) -> Void
     ) {
         if length == 0 {
             completion(.success(Data()))
             return
         }
 
-        var buffer = Data()
+        let buffer = ReceiveBuffer()
 
-        func step() {
-            connection.receive(minimumIncompleteLength: 1, maximumLength: length - buffer.count) { data, _, isComplete, error in
+        @Sendable func step() {
+            connection.receive(
+                minimumIncompleteLength: 1,
+                maximumLength: length - buffer.data.count
+            ) { data, _, isComplete, error in
                 if let error {
                     completion(.failure(error))
                     return
                 }
 
                 if let data, !data.isEmpty {
-                    buffer.append(data)
+                    buffer.data.append(data)
                 }
 
-                if buffer.count == length {
-                    completion(.success(buffer))
+                if buffer.data.count == length {
+                    completion(.success(buffer.data))
                     return
                 }
 
@@ -509,6 +882,20 @@ final class ReceiverServer {
         guard let reason else { return }
         onLog?("Releasing stale sender: \(reason).")
         handleDisconnect(connection: connection, reason: reason)
+    }
+
+    private func peerIdentifier(for connection: NWConnection) -> String {
+        if case .hostPort(let host, _) = connection.endpoint {
+            return String(describing: host)
+        }
+        return String(describing: connection.endpoint)
+    }
+
+    private func syncOnQueue<T>(_ body: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return try body()
+        }
+        return try queue.sync(execute: body)
     }
 }
 

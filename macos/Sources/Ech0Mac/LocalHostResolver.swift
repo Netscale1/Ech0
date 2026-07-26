@@ -57,8 +57,7 @@ enum LocalHostResolver {
                 guard !candidate.isVirtual else { return false }
                 return true
             }
-            .sorted(by: isPreferred(_:over:))
-            .first?
+            .min(by: isPreferred(_:over:))?
             .address
     }
 

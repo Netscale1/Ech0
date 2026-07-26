@@ -7,7 +7,7 @@ namespace Ech0.Windows;
 
 internal sealed class AudioCaptureService : IDisposable
 {
-    private readonly Channel<byte[]> frames = Channel.CreateBounded<byte[]>(
+    private readonly Channel<CapturedPcmFrame> frames = Channel.CreateBounded<CapturedPcmFrame>(
         new BoundedChannelOptions(8)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
@@ -15,25 +15,40 @@ internal sealed class AudioCaptureService : IDisposable
             SingleWriter = true,
         });
     private readonly PcmFrameAccumulator accumulator = new();
+    private readonly object captureSync = new();
     private WasapiCapture? capture;
     private long startTimestamp;
     private bool loggedFirstDataAvailable;
 
-    public ChannelReader<byte[]> Frames => frames.Reader;
+    public event Action<UnexpectedCaptureStop>? StoppedUnexpectedly;
+    public ChannelReader<CapturedPcmFrame> Frames => frames.Reader;
     public string? DeviceName { get; private set; }
-    public bool IsCapturing => capture is not null;
+    public bool IsCapturing
+    {
+        get
+        {
+            lock (captureSync)
+            {
+                return capture is not null;
+            }
+        }
+    }
     public long StartTimestamp => startTimestamp;
     public int SessionId { get; private set; }
+    public ulong Generation { get; private set; }
 
-    public void Start(string? inputDeviceId = null)
+    public void Start(string? inputDeviceId, ulong generation)
     {
-        if (capture is not null)
+        lock (captureSync)
         {
-            return;
+            if (capture is not null)
+            {
+                return;
+            }
         }
 
         using var enumerator = new MMDeviceEnumerator();
-        var device = string.IsNullOrWhiteSpace(inputDeviceId)
+        using var device = string.IsNullOrWhiteSpace(inputDeviceId)
             ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console)
             : enumerator.GetDevice(inputDeviceId);
         var nextCapture = new WasapiCapture(device, true, 20)
@@ -42,19 +57,37 @@ internal sealed class AudioCaptureService : IDisposable
         };
         nextCapture.DataAvailable += OnDataAvailable;
         nextCapture.RecordingStopped += OnRecordingStopped;
-        DeviceName = device.FriendlyName;
-        accumulator.Clear();
-        startTimestamp = Stopwatch.GetTimestamp();
-        loggedFirstDataAvailable = false;
-        SessionId++;
-        nextCapture.StartRecording();
-        capture = nextCapture;
+        lock (captureSync)
+        {
+            DeviceName = device.FriendlyName;
+            accumulator.Clear();
+            startTimestamp = Stopwatch.GetTimestamp();
+            loggedFirstDataAvailable = false;
+            SessionId++;
+            Generation = generation;
+            capture = nextCapture;
+        }
+        try
+        {
+            nextCapture.StartRecording();
+        }
+        catch
+        {
+            ReleaseCapture(nextCapture, out _, out _);
+            throw;
+        }
     }
 
     public void Stop()
     {
-        var current = capture;
-        capture = null;
+        WasapiCapture? current;
+        lock (captureSync)
+        {
+            current = capture;
+            capture = null;
+            DeviceName = null;
+            accumulator.Clear();
+        }
         if (current is null)
         {
             return;
@@ -68,31 +101,77 @@ internal sealed class AudioCaptureService : IDisposable
         finally
         {
             current.Dispose();
-            DeviceName = null;
-            accumulator.Clear();
         }
     }
 
     private void OnDataAvailable(object? sender, WaveInEventArgs args)
     {
-        if (!loggedFirstDataAvailable)
+        int sessionId;
+        ulong generation;
+        long? firstDataElapsedMs = null;
+        IReadOnlyList<byte[]> completeFrames;
+        lock (captureSync)
         {
-            loggedFirstDataAvailable = true;
-            var elapsedMs = (long)Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
+            if (!ReferenceEquals(capture, sender))
+            {
+                return;
+            }
+            sessionId = SessionId;
+            generation = Generation;
+            if (!loggedFirstDataAvailable)
+            {
+                loggedFirstDataAvailable = true;
+                firstDataElapsedMs = (long)Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
+            }
+            completeFrames = accumulator.Append(args.Buffer.AsSpan(0, args.BytesRecorded));
+        }
+        if (firstDataElapsedMs is long elapsedMs)
+        {
             ThreadPool.QueueUserWorkItem(_ => Log.Write("capture_first_data", $"{elapsedMs}ms"));
         }
-        foreach (var frame in accumulator.Append(args.Buffer.AsSpan(0, args.BytesRecorded)))
+        foreach (var frame in completeFrames)
         {
-            frames.Writer.TryWrite(frame);
+            frames.Writer.TryWrite(new CapturedPcmFrame(sessionId, generation, frame));
         }
     }
 
     private void OnRecordingStopped(object? sender, StoppedEventArgs args)
     {
-        if (args.Exception is not null)
+        if (sender is not WasapiCapture stoppedCapture
+            || !ReleaseCapture(stoppedCapture, out var sessionId, out var generation))
         {
-            Log.Write("audio_capture_stopped", args.Exception.GetType().Name);
+            return;
         }
+        var errorCode = args.Exception?.GetType().Name ?? "captureStopped";
+        Log.Write(
+            "audio_capture_stopped",
+            errorCode);
+        StoppedUnexpectedly?.Invoke(new UnexpectedCaptureStop(sessionId, generation, errorCode));
+    }
+
+    private bool ReleaseCapture(
+        WasapiCapture stoppedCapture,
+        out int sessionId,
+        out ulong generation)
+    {
+        lock (captureSync)
+        {
+            if (!ReferenceEquals(capture, stoppedCapture))
+            {
+                sessionId = 0;
+                generation = 0;
+                return false;
+            }
+            sessionId = SessionId;
+            generation = Generation;
+            capture = null;
+            DeviceName = null;
+            accumulator.Clear();
+        }
+        stoppedCapture.DataAvailable -= OnDataAvailable;
+        stoppedCapture.RecordingStopped -= OnRecordingStopped;
+        stoppedCapture.Dispose();
+        return true;
     }
 
     public void Dispose()
@@ -105,24 +184,43 @@ internal sealed class AudioCaptureService : IDisposable
         => (ulong)(Stopwatch.GetTimestamp() * 1000L / Stopwatch.Frequency);
 }
 
+internal sealed record CapturedPcmFrame(int SessionId, ulong Generation, byte[] Pcm);
+internal sealed record UnexpectedCaptureStop(int SessionId, ulong Generation, string ErrorCode);
+
 internal sealed class PcmFrameAccumulator
 {
-    private readonly List<byte> pending = new(Ech0Protocol.PcmBytesPerFrame * 2);
+    private readonly byte[] pending = new byte[Ech0Protocol.PcmBytesPerFrame];
+    private int pendingCount;
 
     public IReadOnlyList<byte[]> Append(ReadOnlySpan<byte> bytes)
     {
-        for (var index = 0; index < bytes.Length; index++)
+        List<byte[]>? frames = null;
+        while (!bytes.IsEmpty)
         {
-            pending.Add(bytes[index]);
+            if (pendingCount == 0 && bytes.Length >= Ech0Protocol.PcmBytesPerFrame)
+            {
+                frames ??= [];
+                frames.Add(bytes[..Ech0Protocol.PcmBytesPerFrame].ToArray());
+                bytes = bytes[Ech0Protocol.PcmBytesPerFrame..];
+                continue;
+            }
+
+            var copyLength = Math.Min(
+                bytes.Length,
+                Ech0Protocol.PcmBytesPerFrame - pendingCount);
+            bytes[..copyLength].CopyTo(pending.AsSpan(pendingCount));
+            pendingCount += copyLength;
+            bytes = bytes[copyLength..];
+
+            if (pendingCount == Ech0Protocol.PcmBytesPerFrame)
+            {
+                frames ??= [];
+                frames.Add((byte[])pending.Clone());
+                pendingCount = 0;
+            }
         }
-        var frames = new List<byte[]>();
-        while (pending.Count >= Ech0Protocol.PcmBytesPerFrame)
-        {
-            frames.Add(pending.GetRange(0, Ech0Protocol.PcmBytesPerFrame).ToArray());
-            pending.RemoveRange(0, Ech0Protocol.PcmBytesPerFrame);
-        }
-        return frames;
+        return frames is null ? Array.Empty<byte[]>() : frames;
     }
 
-    public void Clear() => pending.Clear();
+    public void Clear() => pendingCount = 0;
 }

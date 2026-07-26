@@ -9,9 +9,10 @@ struct JitterBufferSnapshot {
     let queuedFrames: Int
 }
 
-final class JitterBuffer {
+final class JitterBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var queuedFrames: [AudioFrame] = []
+    private var queuedSampleCount = 0
     private var currentFrame: AudioFrame?
     private var currentSampleIndex = 0
     private var isPrimedForPlayback = false
@@ -30,6 +31,7 @@ final class JitterBuffer {
     func reset() {
         lock.withLock {
             queuedFrames.removeAll()
+            queuedSampleCount = 0
             currentFrame = nil
             currentSampleIndex = 0
             isPrimedForPlayback = false
@@ -53,9 +55,10 @@ final class JitterBuffer {
             lastSequence = frame.sequence
             hasReceivedFrameSinceReset = true
             queuedFrames.append(frame)
+            queuedSampleCount += frame.samples.count
 
             while bufferedMsUnlocked() > maxTargetMs, !queuedFrames.isEmpty {
-                queuedFrames.removeFirst()
+                queuedSampleCount -= queuedFrames.removeFirst().samples.count
                 overruns += 1
                 targetBufferMs = max(minTargetMs, targetBufferMs - 10)
             }
@@ -63,54 +66,70 @@ final class JitterBuffer {
     }
 
     func consumeMonoSamples(count: Int) -> [Int16] {
-        lock.withLock {
-            var output = Array(repeating: Int16(0), count: count)
-            guard hasReceivedFrameSinceReset else { return output }
-            var filled = 0
+        var output = Array(repeating: Int16(0), count: count)
+        output.withUnsafeMutableBufferPointer { samples in
+            consumeMonoSamples(into: samples)
+        }
+        return output
+    }
 
-            while filled < count {
-                if currentFrame == nil || currentSampleIndex >= (currentFrame?.samples.count ?? 0) {
-                    currentFrame = nil
-                    currentSampleIndex = 0
+    func consumeMonoSamples(into output: UnsafeMutableBufferPointer<Int16>) {
+        for index in output.indices {
+            output[index] = 0
+        }
+        guard lock.try() else { return }
+        defer { lock.unlock() }
+        guard hasReceivedFrameSinceReset else { return }
+        var filled = 0
+        var waitingForPrime = false
 
-                    guard isPrimedForPlayback || bufferedMsUnlocked() >= targetBufferMs else {
-                        break
-                    }
+        while filled < output.count {
+            if currentFrame == nil || currentSampleIndex >= (currentFrame?.samples.count ?? 0) {
+                currentFrame = nil
+                currentSampleIndex = 0
 
-                    guard !queuedFrames.isEmpty else {
-                        break
-                    }
-                    currentFrame = queuedFrames.removeFirst()
-                    isPrimedForPlayback = true
+                guard isPrimedForPlayback || bufferedMsUnlocked() >= targetBufferMs else {
+                    waitingForPrime = true
+                    break
                 }
 
-                guard let frame = currentFrame else { break }
-                let available = frame.samples.count - currentSampleIndex
-                let take = min(available, count - filled)
-                output.replaceSubrange(
-                    filled..<(filled + take),
-                    with: frame.samples[currentSampleIndex..<(currentSampleIndex + take)]
+                guard !queuedFrames.isEmpty else {
+                    break
+                }
+                let nextFrame = queuedFrames.removeFirst()
+                queuedSampleCount -= nextFrame.samples.count
+                currentFrame = nextFrame
+                isPrimedForPlayback = true
+            }
+
+            guard let frame = currentFrame else { break }
+            let available = frame.samples.count - currentSampleIndex
+            let take = min(available, output.count - filled)
+            frame.samples.withUnsafeBufferPointer { source in
+                guard let sourceAddress = source.baseAddress,
+                      let outputAddress = output.baseAddress else { return }
+                outputAddress.advanced(by: filled).update(
+                    from: sourceAddress.advanced(by: currentSampleIndex),
+                    count: take
                 )
-                currentSampleIndex += take
-                filled += take
             }
+            currentSampleIndex += take
+            filled += take
+        }
 
-            if filled < count {
-                underruns += 1
-                targetBufferMs = min(maxTargetMs, targetBufferMs + 20)
+        if filled < output.count, !waitingForPrime {
+            underruns += 1
+            targetBufferMs = min(maxTargetMs, targetBufferMs + 20)
+            stableReads = 0
+            if currentFrame == nil && queuedFrames.isEmpty {
+                isPrimedForPlayback = false
+            }
+        } else {
+            stableReads += 1
+            if stableReads >= 50, targetBufferMs > minTargetMs, bufferedMsUnlocked() > targetBufferMs {
+                targetBufferMs = max(minTargetMs, targetBufferMs - 10)
                 stableReads = 0
-                if currentFrame == nil && queuedFrames.isEmpty {
-                    isPrimedForPlayback = false
-                }
-            } else {
-                stableReads += 1
-                if stableReads >= 50, targetBufferMs > minTargetMs, bufferedMsUnlocked() > targetBufferMs {
-                    targetBufferMs = max(minTargetMs, targetBufferMs - 10)
-                    stableReads = 0
-                }
             }
-
-            return output
         }
     }
 
@@ -128,9 +147,8 @@ final class JitterBuffer {
     }
 
     private func bufferedMsUnlocked() -> Int {
-        let queuedSamples = queuedFrames.reduce(0) { $0 + $1.samples.count }
         let currentSamples = currentFrame.map { max(0, $0.samples.count - currentSampleIndex) } ?? 0
-        return (queuedSamples + currentSamples) * 1_000 / 48_000
+        return (queuedSampleCount + currentSamples) * 1_000 / 48_000
     }
 }
 

@@ -109,6 +109,26 @@ internal sealed record ClientHello(
     int Channels,
     int FrameMs);
 
+internal sealed record KeyExchangeClientHello(
+    string Kind,
+    int ProtocolVersion,
+    string AuthMode,
+    string ClientEphemeralPublicKey,
+    string ClientNonce,
+    string? ExpectedReceiverId,
+    string? ExpectedReceiverKeyHash);
+
+internal sealed record KeyExchangeServerHello(
+    string Kind,
+    bool Accepted,
+    string? Reason,
+    string? ReceiverId,
+    string? ServerSigningPublicKey,
+    string? ServerEphemeralPublicKey,
+    string? ServerNonce,
+    string? Signature,
+    string? PairingProof);
+
 internal sealed record ServerHello(
     string Kind,
     bool Accepted,
@@ -118,6 +138,7 @@ internal sealed record ServerHello(
     string[]? Capabilities,
     string? ReceiverId,
     string? ReceiverName,
+    string? ReceiverKeyHash,
     string? Authentication,
     bool? TrustEstablished);
 

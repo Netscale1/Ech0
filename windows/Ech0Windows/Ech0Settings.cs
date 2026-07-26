@@ -22,11 +22,14 @@ internal sealed class Ech0Settings
     public string ProtectedPairingToken { get; set; } = "";
     public string ReceiverId { get; set; } = "";
     public string ReceiverName { get; set; } = "";
+    public string ReceiverKeyHash { get; set; } = "";
     public bool TrustConfirmed { get; set; }
     public bool LaunchAtLogin { get; set; } = true;
 
     [JsonIgnore]
-    public PairingState PairingState => TrustConfirmed && !string.IsNullOrWhiteSpace(ReceiverId)
+    public PairingState PairingState => TrustConfirmed
+        && !string.IsNullOrWhiteSpace(ReceiverId)
+        && !string.IsNullOrWhiteSpace(ReceiverKeyHash)
         ? PairingState.Trusted
         : !string.IsNullOrWhiteSpace(ProtectedPairingToken)
             ? PairingState.PairingPending
@@ -59,7 +62,9 @@ internal sealed class Ech0Settings
 
     public bool TryCompleteTrust(ServerHello hello)
     {
-        if (hello.TrustEstablished != true || string.IsNullOrWhiteSpace(hello.ReceiverId))
+        if (hello.TrustEstablished != true
+            || string.IsNullOrWhiteSpace(hello.ReceiverId)
+            || string.IsNullOrWhiteSpace(hello.ReceiverKeyHash))
         {
             return false;
         }
@@ -68,9 +73,11 @@ internal sealed class Ech0Settings
         var changed = !TrustConfirmed
             || ReceiverId != hello.ReceiverId
             || ReceiverName != receiverName
+            || ReceiverKeyHash != hello.ReceiverKeyHash
             || !string.IsNullOrEmpty(ProtectedPairingToken);
         ReceiverId = hello.ReceiverId;
         ReceiverName = receiverName;
+        ReceiverKeyHash = hello.ReceiverKeyHash;
         TrustConfirmed = true;
         PairingToken = "";
         return changed;
@@ -98,6 +105,7 @@ internal sealed class Ech0Settings
         Port = 48_484;
         ReceiverId = "";
         ReceiverName = "";
+        ReceiverKeyHash = "";
         TrustConfirmed = false;
         PairingToken = "";
         SenderId = Guid.NewGuid().ToString("D");
@@ -138,11 +146,15 @@ internal static class SettingsStore
 
     public static void Save(Ech0Settings settings)
     {
-        Directory.CreateDirectory(DirectoryPath);
-        _ = settings.TrustedSecret;
-        var temporary = FilePath + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
-        File.Move(temporary, FilePath, true);
+        AtomicSettingsFile.Write(
+            FilePath,
+            () =>
+            {
+                _ = settings.TrustedSecret;
+                return JsonSerializer.Serialize(
+                    settings,
+                    new JsonSerializerOptions { WriteIndented = true });
+            });
     }
 
     public static string Protect(string value)
@@ -158,5 +170,33 @@ internal static class SettingsStore
     {
         var bytes = ProtectedData.Unprotect(Convert.FromBase64String(value), Entropy, DataProtectionScope.CurrentUser);
         return System.Text.Encoding.UTF8.GetString(bytes);
+    }
+}
+
+internal static class AtomicSettingsFile
+{
+    private static readonly object WriteGate = new();
+
+    public static void Write(string filePath, Func<string> contentFactory)
+    {
+        lock (WriteGate)
+        {
+            var directory = Path.GetDirectoryName(filePath)
+                ?? throw new InvalidOperationException("Settings path has no parent directory.");
+            Directory.CreateDirectory(directory);
+            var temporary = $"{filePath}.{Guid.NewGuid():N}.tmp";
+            try
+            {
+                File.WriteAllText(temporary, contentFactory());
+                File.Move(temporary, filePath, true);
+            }
+            finally
+            {
+                if (File.Exists(temporary))
+                {
+                    File.Delete(temporary);
+                }
+            }
+        }
     }
 }

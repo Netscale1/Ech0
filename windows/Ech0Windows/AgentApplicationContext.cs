@@ -13,9 +13,11 @@ internal sealed class AgentApplicationContext : ApplicationContext
     private readonly Icon waitingIcon = TrayIcons.Load("Ech0Waiting.ico");
     private readonly Icon unavailableIcon = TrayIcons.Load("Ech0Unavailable.ico");
     private readonly Icon capturingIcon = TrayIcons.Load("Ech0Capturing.ico");
+    private readonly SemaphoreSlim workerLifecycleGate = new(1, 1);
     private Ech0Settings settings;
     private ConnectionWorker? worker;
     private bool paused;
+    private bool isExiting;
     private AgentState currentState = AgentState.Disconnected;
 
     public AgentApplicationContext()
@@ -76,15 +78,49 @@ internal sealed class AgentApplicationContext : ApplicationContext
         }
     }
 
-    private async void StartWorker()
+    private void StartWorker() => _ = StartWorkerAsync();
+
+    private async Task StartWorkerAsync()
     {
-        await StopWorkerAsync();
-        worker = new ConnectionWorker(settings);
-        worker.StateChanged += OnStateChanged;
-        _ = worker.RunAsync();
+        await workerLifecycleGate.WaitAsync();
+        try
+        {
+            if (isExiting)
+            {
+                return;
+            }
+
+            await StopWorkerUnlockedAsync();
+            var nextWorker = new ConnectionWorker(settings, paused);
+            worker = nextWorker;
+            nextWorker.StateChanged += OnStateChanged;
+            _ = nextWorker.RunAsync();
+        }
+        catch (Exception exception)
+        {
+            Log.Write("worker_start_failed", exception.GetType().Name);
+            SetState(AgentState.Disconnected, exception.GetType().Name);
+        }
+        finally
+        {
+            workerLifecycleGate.Release();
+        }
     }
 
     private async Task StopWorkerAsync()
+    {
+        await workerLifecycleGate.WaitAsync();
+        try
+        {
+            await StopWorkerUnlockedAsync();
+        }
+        finally
+        {
+            workerLifecycleGate.Release();
+        }
+    }
+
+    private async Task StopWorkerUnlockedAsync()
     {
         var current = worker;
         worker = null;
@@ -95,11 +131,21 @@ internal sealed class AgentApplicationContext : ApplicationContext
         }
     }
 
-    private void OnStateChanged(AgentState state, string? detail)
+    private void OnStateChanged(ConnectionWorker source, AgentState state, string? detail)
     {
+        if (!ReferenceEquals(worker, source))
+        {
+            return;
+        }
         if (dispatcher.InvokeRequired)
         {
-            dispatcher.BeginInvoke(() => SetState(state, detail));
+            dispatcher.BeginInvoke(() =>
+            {
+                if (ReferenceEquals(worker, source))
+                {
+                    SetState(state, detail);
+                }
+            });
             return;
         }
         SetState(state, detail);
@@ -160,6 +206,7 @@ internal sealed class AgentApplicationContext : ApplicationContext
 
     private async Task ExitAsync()
     {
+        isExiting = true;
         tray.Visible = false;
         await StopWorkerAsync();
         tray.Dispose();

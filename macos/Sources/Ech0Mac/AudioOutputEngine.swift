@@ -2,50 +2,77 @@ import AudioToolbox
 import CoreAudio
 import Foundation
 
-final class AudioOutputEngine {
+final class AudioOutputEngine: @unchecked Sendable {
     private let jitterBuffer = JitterBuffer()
+    private let lifecycleLock = NSLock()
     private var audioUnit: AudioUnit?
-    private(set) var outputDevice: AudioDeviceDescriptor?
-    private(set) var isRunning = false
+    private var virtualMicrophoneWriter: VirtualMicrophoneWriter?
+    private var storedOutputDevice: AudioDeviceDescriptor?
+    private var running = false
+
+    var outputDevice: AudioDeviceDescriptor? {
+        withLifecycleLock { storedOutputDevice }
+    }
+
+    var isRunning: Bool {
+        withLifecycleLock { running }
+    }
 
     func prepare(deviceNamed name: String = "BlackHole 2ch") throws {
+        if let writer = VirtualMicrophoneWriter.connect() {
+            withLifecycleLock {
+                stopUnlocked()
+                virtualMicrophoneWriter = writer
+                storedOutputDevice = writer.device
+            }
+            return
+        }
+
         guard let device = SystemAudio.deviceNamed(name) else {
             throw ReceiverError.audioDeviceNotFound(name)
         }
-        try configureAudioUnit(for: device)
-        outputDevice = device
+        try withLifecycleLock {
+            try configureAudioUnitUnlocked(for: device)
+            storedOutputDevice = device
+        }
     }
 
     func start() throws {
-        guard !isRunning else { return }
-        guard let audioUnit else {
-            throw ReceiverError.audioComponentUnavailable
-        }
+        try withLifecycleLock {
+            guard !running else { return }
+            if virtualMicrophoneWriter != nil {
+                running = true
+                return
+            }
+            guard let audioUnit else {
+                throw ReceiverError.audioComponentUnavailable
+            }
 
-        let status = AudioOutputUnitStart(audioUnit)
-        guard status == noErr else {
-            throw ReceiverError.coreAudio(status)
+            let status = AudioOutputUnitStart(audioUnit)
+            guard status == noErr else {
+                throw ReceiverError.coreAudio(status)
+            }
+            running = true
         }
-        isRunning = true
     }
 
     func stop() {
+        withLifecycleLock {
+            stopUnlocked()
+        }
+    }
+
+    private func stopUnlocked() {
+        virtualMicrophoneWriter?.clear()
         if let audioUnit {
             AudioOutputUnitStop(audioUnit)
             AudioUnitUninitialize(audioUnit)
             AudioComponentInstanceDispose(audioUnit)
         }
         audioUnit = nil
-        outputDevice = nil
-        isRunning = false
-        jitterBuffer.reset()
-    }
-
-    func suspend() {
-        if let audioUnit, isRunning {
-            AudioOutputUnitStop(audioUnit)
-        }
-        isRunning = false
+        virtualMicrophoneWriter = nil
+        storedOutputDevice = nil
+        running = false
         jitterBuffer.reset()
     }
 
@@ -54,10 +81,18 @@ final class AudioOutputEngine {
     }
 
     func enqueue(_ frame: AudioFrame) {
+        if let writer = withLifecycleLock({ virtualMicrophoneWriter }) {
+            writer.write(frame)
+            return
+        }
         jitterBuffer.push(frame)
     }
 
     func clear() {
+        if let writer = withLifecycleLock({ virtualMicrophoneWriter }) {
+            writer.clear()
+            return
+        }
         jitterBuffer.reset()
     }
 
@@ -68,32 +103,49 @@ final class AudioOutputEngine {
     fileprivate func render(frameCount: Int, ioData: UnsafeMutablePointer<AudioBufferList>?) -> OSStatus {
         guard let ioData else { return noErr }
 
-        let monoSamples = jitterBuffer.consumeMonoSamples(count: frameCount)
         let bufferList = UnsafeMutableAudioBufferListPointer(ioData)
 
         if bufferList.count == 1 {
-            guard let rawPointer = bufferList[0].mData else { return noErr }
+            guard let rawPointer = bufferList[0].mData,
+                  Int(bufferList[0].mDataByteSize) >= frameCount * MemoryLayout<Int16>.size * 2 else {
+                return kAudio_ParamError
+            }
             let stereoPointer = rawPointer.bindMemory(to: Int16.self, capacity: frameCount * 2)
-            for index in 0..<frameCount {
-                let sample = monoSamples[index]
+            jitterBuffer.consumeMonoSamples(
+                into: UnsafeMutableBufferPointer(start: stereoPointer, count: frameCount)
+            )
+            guard frameCount > 0 else { return noErr }
+            for index in stride(from: frameCount - 1, through: 0, by: -1) {
+                let sample = stereoPointer[index]
                 stereoPointer[index * 2] = sample
                 stereoPointer[index * 2 + 1] = sample
             }
         } else {
-            for buffer in bufferList {
-                guard let rawPointer = buffer.mData else { continue }
-                let monoPointer = rawPointer.bindMemory(to: Int16.self, capacity: frameCount)
-                for index in 0..<frameCount {
-                    monoPointer[index] = monoSamples[index]
+            guard let firstRawPointer = bufferList.first?.mData,
+                  Int(bufferList.first?.mDataByteSize ?? 0) >= frameCount * MemoryLayout<Int16>.size else {
+                return kAudio_ParamError
+            }
+            let firstPointer = firstRawPointer.bindMemory(to: Int16.self, capacity: frameCount)
+            jitterBuffer.consumeMonoSamples(
+                into: UnsafeMutableBufferPointer(start: firstPointer, count: frameCount)
+            )
+            for buffer in bufferList.dropFirst() {
+                guard let rawPointer = buffer.mData,
+                      Int(buffer.mDataByteSize) >= frameCount * MemoryLayout<Int16>.size else {
+                    return kAudio_ParamError
                 }
+                rawPointer.copyMemory(
+                    from: firstRawPointer,
+                    byteCount: frameCount * MemoryLayout<Int16>.size
+                )
             }
         }
 
         return noErr
     }
 
-    private func configureAudioUnit(for device: AudioDeviceDescriptor) throws {
-        stop()
+    private func configureAudioUnitUnlocked(for device: AudioDeviceDescriptor) throws {
+        stopUnlocked()
 
         var componentDescription = AudioComponentDescription(
             componentType: kAudioUnitType_Output,
@@ -111,6 +163,12 @@ final class AudioOutputEngine {
         let instanceStatus = AudioComponentInstanceNew(component, &maybeAudioUnit)
         guard instanceStatus == noErr, let audioUnit = maybeAudioUnit else {
             throw ReceiverError.coreAudio(instanceStatus)
+        }
+        var shouldDisposeAudioUnit = true
+        defer {
+            if shouldDisposeAudioUnit {
+                AudioComponentInstanceDispose(audioUnit)
+            }
         }
 
         var enableOutput: UInt32 = 1
@@ -186,6 +244,13 @@ final class AudioOutputEngine {
         guard status == noErr else { throw ReceiverError.coreAudio(status) }
 
         self.audioUnit = audioUnit
+        shouldDisposeAudioUnit = false
+    }
+
+    private func withLifecycleLock<T>(_ body: () throws -> T) rethrows -> T {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return try body()
     }
 }
 

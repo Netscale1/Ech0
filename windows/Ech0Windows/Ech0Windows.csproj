@@ -17,7 +17,6 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Resources\Ech0Disconnected.ico" LogicalName="Ech0.Windows.Resources.Ech0Disconnected.ico" />

@@ -4,7 +4,7 @@ import XCTest
 final class ReceiverAuthenticationTests: XCTestCase {
     func testTrustedIdentityTakesPrecedenceOverPairingToken() {
         let decision = ReceiverAuthenticationDecision.evaluate(
-            protocolVersion: 2,
+            authenticationMode: .trusted,
             tokenMatches: true,
             trustedIdentityMatches: true
         )
@@ -13,9 +13,9 @@ final class ReceiverAuthenticationTests: XCTestCase {
         XCTAssertEqual(decision.authentication, "trusted")
     }
 
-    func testVersionTwoRequestsPairingForUnknownSender() {
+    func testVersionThreeRequestsPairingForUnknownSender() {
         let decision = ReceiverAuthenticationDecision.evaluate(
-            protocolVersion: 2,
+            authenticationMode: .trusted,
             tokenMatches: false,
             trustedIdentityMatches: false
         )
@@ -24,13 +24,68 @@ final class ReceiverAuthenticationTests: XCTestCase {
         XCTAssertEqual(decision.rejectionReason, "pairingRequired")
     }
 
-    func testVersionOneKeepsLegacyInvalidTokenReason() {
-        let decision = ReceiverAuthenticationDecision.evaluate(
-            protocolVersion: 1,
-            tokenMatches: false,
-            trustedIdentityMatches: false
+    func testOnlySecureVersionThreeWithRemoteCaptureControlIsSupported() {
+        XCTAssertEqual(
+            ReceiverProtocolSupport.rejectionReason(
+                protocolVersion: 1,
+                capabilities: ["remoteCaptureControl"]
+            ),
+            "unsupportedProtocol"
         )
-
-        XCTAssertEqual(decision.rejectionReason, "invalidToken")
+        XCTAssertEqual(
+            ReceiverProtocolSupport.rejectionReason(
+                protocolVersion: 3,
+                capabilities: ["remoteCaptureControl"]
+            ),
+            "unsupportedCapabilities"
+        )
+        XCTAssertNil(
+            ReceiverProtocolSupport.rejectionReason(
+                protocolVersion: 3,
+                capabilities: ["remoteCaptureControl", "secureTransportV3"]
+            )
+        )
     }
+
+    func testAuthenticationModeCannotBeDowngradedAcrossCredentialTypes() {
+        XCTAssertFalse(
+            ReceiverAuthenticationDecision.evaluate(
+                authenticationMode: .trusted,
+                tokenMatches: true,
+                trustedIdentityMatches: false
+            ).accepted
+        )
+        XCTAssertFalse(
+            ReceiverAuthenticationDecision.evaluate(
+                authenticationMode: .pairing,
+                tokenMatches: false,
+                trustedIdentityMatches: true
+            ).accepted
+        )
+    }
+
+    func testPairingIsNotEstablishedUntilTrustWasPersisted() {
+        XCTAssertFalse(
+            ReceiverTrustEstablishment.succeeds(
+                trustedIdentityMatches: false,
+                tokenMatches: true,
+                pairingWasPersisted: false
+            )
+        )
+        XCTAssertTrue(
+            ReceiverTrustEstablishment.succeeds(
+                trustedIdentityMatches: false,
+                tokenMatches: true,
+                pairingWasPersisted: true
+            )
+        )
+        XCTAssertTrue(
+            ReceiverTrustEstablishment.succeeds(
+                trustedIdentityMatches: true,
+                tokenMatches: false,
+                pairingWasPersisted: false
+            )
+        )
+    }
+
 }

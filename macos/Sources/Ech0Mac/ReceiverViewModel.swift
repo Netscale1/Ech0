@@ -15,6 +15,30 @@ struct ReceiverMetrics {
     var peakLevel = 0.0
 }
 
+@MainActor
+final class ReceiverMetricsModel: ObservableObject {
+    @Published private(set) var value = ReceiverMetrics()
+
+    func update(_ metrics: ReceiverMetrics) {
+        value = metrics
+    }
+}
+
+struct ReceiverPresentationPolicy {
+    static func remoteCaptureState(
+        current: String,
+        after connectionState: ReceiverServer.ConnectionState
+    ) -> String {
+        switch connectionState {
+        case .connected:
+            return current
+        case .idle, .listening, .handshaking:
+            return "idle"
+        }
+    }
+}
+
+@MainActor
 final class ReceiverViewModel: ObservableObject {
     @Published var clientName: String?
     @Published var connectionLabel = "Starting"
@@ -22,9 +46,8 @@ final class ReceiverViewModel: ObservableObject {
     @Published var host = LocalHostResolver.primaryIPv4Address() ?? "127.0.0.1"
     @Published var isBlackHoleAvailable = false
     @Published var logs: [String] = []
-    @Published var metrics = ReceiverMetrics()
-    @Published var pairingCode = PairingCode.generate()
-    @Published private(set) var qrImage: NSImage?
+    let metrics = ReceiverMetricsModel()
+    @Published var pairingCode: String
     @Published private(set) var trustedDevices: [TrustedDevice] = []
     @Published private(set) var connectedSenderId: String?
     @Published private(set) var inputConsumers: [String] = []
@@ -42,26 +65,45 @@ final class ReceiverViewModel: ObservableObject {
     let port: UInt16 = 48_484
 
     private let audioEngine = AudioOutputEngine()
+    private let audioFrameMetrics = AudioFrameMetricsAccumulator()
     private let trustedDeviceStore = TrustedDeviceStore()
-    private let receiverIdentity = ReceiverIdentityStore().loadOrCreate()
+    private let receiverIdentity: ReceiverIdentity
+    private let receiverIdentityError: Error?
     private let inputDemandMonitor = AudioInputDemandMonitor()
     private let codexAccessibilityMonitor = CodexDictationAccessibilityMonitor()
     private let codexShortcutMonitor = CodexDictationShortcutMonitor()
-    private lazy var server = ReceiverServer(
-        port: port,
-        token: pairingCode,
-        receiverId: receiverIdentity.id,
-        receiverName: Host.current().localizedName ?? "Ech0 Mac"
-    )
-    private var metricsTimer: Timer?
+    private let server: ReceiverServer
+    private var metricsTimer: DispatchSourceTimer?
     private var captureDemandWasActive = false
-    private var captureDemandStartedAt: TimeInterval?
-    private var loggedFirstFrameForDemand = false
+    private static let logTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
 
     init() {
+        let initialPairingCode = PairingCode.generate()
+        let loadedIdentity: ReceiverIdentity
+        let identityError: Error?
+        do {
+            loadedIdentity = try ReceiverIdentityStore().loadOrCreate()
+            identityError = nil
+        } catch {
+            loadedIdentity = ReceiverIdentity(id: "")
+            identityError = error
+        }
+        pairingCode = initialPairingCode
+        receiverIdentity = loadedIdentity
+        receiverIdentityError = identityError
+        server = ReceiverServer(
+            port: 48_484,
+            token: initialPairingCode,
+            receiverId: loadedIdentity.id,
+            receiverName: Host.current().localizedName ?? "Ech0 Mac",
+            signingPrivateKey: loadedIdentity.signingPrivateKey
+        )
         bindCallbacks()
         refreshHostAddress()
-        refreshPairingAssets()
         refreshTrustedDevices()
         refreshBlackHoleStatus()
         startMetricsTimer()
@@ -76,7 +118,7 @@ final class ReceiverViewModel: ObservableObject {
     }
 
     deinit {
-        metricsTimer?.invalidate()
+        metricsTimer?.cancel()
         server.stop()
         audioEngine.stop()
         inputDemandMonitor.stop()
@@ -84,13 +126,8 @@ final class ReceiverViewModel: ObservableObject {
         codexShortcutMonitor.stop()
     }
 
-    var pairingPayload: PairingPayload {
-        PairingPayload(v: 1, host: host, port: Int(port), token: pairingCode)
-    }
-
     func refreshHostAddress() {
         host = LocalHostResolver.primaryIPv4Address() ?? host
-        refreshPairingAssets()
     }
 
     func refreshBlackHoleStatus() {
@@ -106,8 +143,15 @@ final class ReceiverViewModel: ObservableObject {
 
         server.stop()
         audioEngine.stop()
-        metrics = ReceiverMetrics()
+        metrics.update(ReceiverMetrics())
         clientName = nil
+
+        if let receiverIdentityError {
+            connectionLabel = "Setup required"
+            errorMessage = "Receiver identity could not be persisted: \(receiverIdentityError.localizedDescription)"
+            appendLog(errorMessage ?? "Receiver identity persistence failed.")
+            return
+        }
 
         guard isBlackHoleAvailable else {
             connectionLabel = "Setup required"
@@ -118,6 +162,7 @@ final class ReceiverViewModel: ObservableObject {
         do {
             try synchronizeBlackHoleDevice()
             try audioEngine.prepare(deviceNamed: blackHoleDeviceName)
+            try audioEngine.start()
             try server.start()
             connectionLabel = "Waiting for sender"
             errorMessage = nil
@@ -131,7 +176,6 @@ final class ReceiverViewModel: ObservableObject {
 
     func regeneratePairingCode() {
         pairingCode = PairingCode.generate()
-        refreshPairingAssets()
         server.updateToken(pairingCode)
         appendLog("Generated a new pairing code.")
     }
@@ -149,17 +193,33 @@ final class ReceiverViewModel: ObservableObject {
     }
 
     func forgetTrustedDevice(_ device: TrustedDevice) {
-        guard trustedDeviceStore.forget(id: device.id) else { return }
-        server.revokeTrustedSender(id: device.id)
-        refreshTrustedDevices()
-        appendLog("Forgot trusted device \(device.deviceName).")
+        do {
+            guard try trustedDeviceStore.forget(id: device.id) else { return }
+            server.revokeTrustedSender(id: device.id)
+            refreshTrustedDevices()
+            appendLog("Forgot trusted device \(device.deviceName).")
+        } catch {
+            errorMessage = error.localizedDescription
+            appendLog("Failed to persist trusted-device removal: \(error.localizedDescription)")
+        }
     }
 
     var isCaptureDemandActive: Bool {
-        guard !automaticCapturePaused else { return false }
-        return codexAccessibilityState.isActive
-            || codexShortcutCaptureActive
-            || inputConsumers.contains { !Self.isPersistentCodexConsumer($0) }
+        CodexCapturePolicy.isCaptureDemandActive(
+            accessibilityState: codexAccessibilityState,
+            manualFallbackActive: codexShortcutCaptureActive,
+            independentInputConsumerActive: inputConsumers.contains {
+                !Self.isPersistentCodexConsumer($0)
+            },
+            automaticCapturePaused: automaticCapturePaused
+        )
+    }
+
+    var canUseCodexManualFallback: Bool {
+        CodexCapturePolicy.allowsManualFallback(
+            accessibilityState: codexAccessibilityState,
+            automaticCapturePaused: automaticCapturePaused
+        )
     }
 
     var isWaitingForCodexDictation: Bool {
@@ -191,7 +251,7 @@ final class ReceiverViewModel: ObservableObject {
     }
 
     func toggleCodexShortcutCapture() {
-        guard !automaticCapturePaused else { return }
+        guard codexShortcutCaptureActive || canUseCodexManualFallback else { return }
         codexShortcutCaptureActive.toggle()
         appendLog(codexShortcutCaptureActive ? "Codex dictation requested." : "Codex dictation ended.")
         updateCaptureDemand()
@@ -237,11 +297,21 @@ final class ReceiverViewModel: ObservableObject {
 
         server.trustSenderFromPairing = { [weak self] hello in
             guard let self else { return false }
-            guard let update = self.trustedDeviceStore.trust(
-                senderId: hello.senderId,
-                deviceName: hello.deviceName,
-                trustedSecret: hello.trustedSecret
-            ) else {
+            let update: TrustUpdate
+            do {
+                guard let persistedUpdate = try self.trustedDeviceStore.trust(
+                    senderId: hello.senderId,
+                    deviceName: hello.deviceName,
+                    trustedSecret: hello.trustedSecret
+                ) else {
+                    return false
+                }
+                update = persistedUpdate
+            } catch {
+                DispatchQueue.main.async {
+                    self.errorMessage = error.localizedDescription
+                    self.appendLog("Failed to persist trusted device: \(error.localizedDescription)")
+                }
                 return false
             }
             DispatchQueue.main.async {
@@ -257,21 +327,18 @@ final class ReceiverViewModel: ObservableObject {
 
         server.onAudioFrame = { [weak self] frame in
             guard let self else { return }
-            if !self.audioEngine.isRunning {
-                try? self.audioEngine.start()
-            }
             self.audioEngine.enqueue(frame)
             let inputLevel = Self.normalizedAudioLevel(for: frame.samples)
-            DispatchQueue.main.async {
-                if !self.loggedFirstFrameForDemand, let startedAt = self.captureDemandStartedAt {
-                    self.loggedFirstFrameForDemand = true
-                    let elapsedMs = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000)
+            let firstFrameLatency = self.audioFrameMetrics.record(
+                sequence: frame.sequence,
+                level: inputLevel,
+                at: ProcessInfo.processInfo.systemUptime
+            )
+            if let firstFrameLatency {
+                DispatchQueue.main.async {
+                    let elapsedMs = firstFrameLatency
                     self.appendLog("First Windows audio frame received after \(elapsedMs) ms.")
                 }
-                self.metrics.framesReceived += 1
-                self.metrics.lastSequence = frame.sequence
-                self.metrics.inputLevel = max(inputLevel, self.metrics.inputLevel * 0.7)
-                self.metrics.peakLevel = max(inputLevel, self.metrics.peakLevel * 0.96)
             }
         }
 
@@ -292,7 +359,7 @@ final class ReceiverViewModel: ObservableObject {
                 guard let self else { return }
                 self.remoteCaptureState = status.state
                 if status.state == "idle" || status.state == "paused" {
-                    self.audioEngine.suspend()
+                    self.audioEngine.clear()
                 }
                 if let errorCode = status.errorCode {
                     self.appendLog("Windows capture error: \(errorCode)")
@@ -305,6 +372,9 @@ final class ReceiverViewModel: ObservableObject {
         inputDemandMonitor.onConsumersChanged = { [weak self] consumers in
             guard let self else { return }
             self.inputConsumers = consumers
+            if consumers.contains(where: Self.isPersistentCodexConsumer) {
+                self.codexAccessibilityMonitor.requestPriorityRescan()
+            }
             self.appendLog(
                 consumers.isEmpty
                     ? "No application is using BlackHole input."
@@ -322,7 +392,7 @@ final class ReceiverViewModel: ObservableObject {
 
     private func bindCodexShortcutMonitor() {
         codexShortcutMonitor.onToggle = { [weak self] in
-            guard let self, !self.codexAccessibilityState.isAvailable else { return }
+            guard let self, self.canUseCodexManualFallback else { return }
             self.toggleCodexShortcutCapture()
         }
     }
@@ -354,8 +424,7 @@ final class ReceiverViewModel: ObservableObject {
         if active != captureDemandWasActive {
             captureDemandWasActive = active
             if active {
-                captureDemandStartedAt = ProcessInfo.processInfo.systemUptime
-                loggedFirstFrameForDemand = false
+                audioFrameMetrics.beginDemand(at: ProcessInfo.processInfo.systemUptime)
                 do {
                     try audioEngine.start()
                 } catch {
@@ -364,13 +433,12 @@ final class ReceiverViewModel: ObservableObject {
                 }
                 appendLog("Capture demand sent to Windows.")
             } else {
-                captureDemandStartedAt = nil
-                loggedFirstFrameForDemand = false
+                audioFrameMetrics.endDemand()
             }
         }
         server.updateCaptureDemand(active: active)
         if !active {
-            audioEngine.suspend()
+            audioEngine.clear()
         }
     }
 
@@ -379,13 +447,18 @@ final class ReceiverViewModel: ObservableObject {
     }
 
     private func apply(state: ReceiverServer.ConnectionState) {
+        remoteCaptureState = ReceiverPresentationPolicy.remoteCaptureState(
+            current: remoteCaptureState,
+            after: state
+        )
         switch state {
         case .idle:
             connectionLabel = "Idle"
             clientName = nil
             connectedSenderId = nil
             audioEngine.stop()
-            metrics = ReceiverMetrics()
+            audioFrameMetrics.reset()
+            metrics.update(ReceiverMetrics())
 
         case .listening:
             connectionLabel = "Waiting for sender"
@@ -394,6 +467,7 @@ final class ReceiverViewModel: ObservableObject {
             audioEngine.stop()
             do {
                 try audioEngine.prepare(deviceNamed: blackHoleDeviceName)
+                try audioEngine.start()
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -411,24 +485,34 @@ final class ReceiverViewModel: ObservableObject {
     }
 
     private func startMetricsTimer() {
-        metricsTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let snapshot = audioEngine.snapshot()
-            self.metrics.bufferedMs = snapshot.bufferedMs
-            self.metrics.targetBufferMs = snapshot.targetBufferMs
-            self.metrics.underruns = snapshot.underruns
-            self.metrics.overruns = snapshot.overruns
-            self.metrics.staleDrops = snapshot.staleDrops
-            self.metrics.inputLevel *= 0.55
-            self.metrics.peakLevel *= 0.92
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.25, repeating: 0.25, leeway: .milliseconds(25))
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                self?.refreshMetricsIfVisible()
+            }
         }
-        if let metricsTimer {
-            RunLoop.main.add(metricsTimer, forMode: .common)
-        }
+        metricsTimer = timer
+        timer.resume()
     }
 
-    private func refreshPairingAssets() {
-        qrImage = QRCodeRenderer.makeImage(from: pairingPayload.jsonString)
+    private func refreshMetricsIfVisible() {
+        let snapshot = audioEngine.snapshot()
+        let frameMetrics = audioFrameMetrics.snapshotAndDecay()
+        guard NSApp.windows.contains(where: {
+            $0.isVisible && $0.title == "Ech0" && $0.styleMask.contains(.titled)
+        }) else { return }
+        metrics.update(ReceiverMetrics(
+            framesReceived: frameMetrics.framesReceived,
+            lastSequence: frameMetrics.lastSequence,
+            bufferedMs: snapshot.bufferedMs,
+            targetBufferMs: snapshot.targetBufferMs,
+            underruns: snapshot.underruns,
+            overruns: snapshot.overruns,
+            staleDrops: snapshot.staleDrops,
+            inputLevel: frameMetrics.inputLevel,
+            peakLevel: frameMetrics.peakLevel
+        ))
     }
 
     private func refreshTrustedDevices() {
@@ -457,9 +541,7 @@ final class ReceiverViewModel: ObservableObject {
     }
 
     private func appendLog(_ line: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        let stampedLine = "[\(formatter.string(from: Date()))] \(line)"
+        let stampedLine = "[\(Self.logTimeFormatter.string(from: Date()))] \(line)"
         logs.insert(stampedLine, at: 0)
         if logs.count > 10 {
             logs = Array(logs.prefix(10))

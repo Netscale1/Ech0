@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 
 namespace Ech0.Windows;
 
@@ -21,7 +22,7 @@ internal sealed class ConnectionWorker : IAsyncDisposable
     private readonly SemaphoreSlim writeGate = new(1, 1);
     private readonly SemaphoreSlim captureGate = new(1, 1);
     private readonly CancellationTokenSource stop = new();
-    private NetworkStream? stream;
+    private Stream? stream;
     private volatile bool paused;
     private volatile bool demandActive;
     private ulong demandGeneration;
@@ -30,12 +31,15 @@ internal sealed class ConnectionWorker : IAsyncDisposable
     private Task? runTask;
     private int lastLoggedAudioSession;
 
-    public event Action<AgentState, string?>? StateChanged;
+    public event Action<ConnectionWorker, AgentState, string?>? StateChanged;
     public string? CurrentDeviceName => capture.DeviceName;
+    internal bool IsPaused => paused;
 
-    public ConnectionWorker(Ech0Settings settings)
+    public ConnectionWorker(Ech0Settings settings, bool initiallyPaused)
     {
         this.settings = settings;
+        paused = initiallyPaused;
+        capture.StoppedUnexpectedly += OnCaptureStoppedUnexpectedly;
     }
 
     public Task RunAsync() => runTask ??= RunReconnectLoopAsync(stop.Token);
@@ -43,7 +47,23 @@ internal sealed class ConnectionWorker : IAsyncDisposable
     public void SetPaused(bool value)
     {
         paused = value;
-        _ = ApplyDemandAsync(stop.Token);
+        _ = ApplyPauseChangeAsync();
+    }
+
+    private async Task ApplyPauseChangeAsync()
+    {
+        try
+        {
+            await ApplyDemandAsync(stop.Token);
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            capture.Stop();
+            Log.Write("pause_apply_failed", exception.GetType().Name);
+        }
     }
 
     private async Task RunReconnectLoopAsync(CancellationToken cancellationToken)
@@ -51,7 +71,7 @@ internal sealed class ConnectionWorker : IAsyncDisposable
         var backoffSeconds = 1;
         while (!cancellationToken.IsCancellationRequested)
         {
-            StateChanged?.Invoke(AgentState.Connecting, null);
+            StateChanged?.Invoke(this, AgentState.Connecting, null);
             try
             {
                 await RunConnectionAsync(cancellationToken);
@@ -66,13 +86,13 @@ internal sealed class ConnectionWorker : IAsyncDisposable
                 Log.Write("pairing_required", exception.Message);
                 settings.MarkPairingRequired();
                 SettingsStore.Save(settings);
-                StateChanged?.Invoke(AgentState.PairingRequired, null);
+                StateChanged?.Invoke(this, AgentState.PairingRequired, null);
                 return;
             }
             catch (Exception exception)
             {
                 Log.Write("connection_failed", exception.GetType().Name);
-                StateChanged?.Invoke(AgentState.Disconnected, exception.GetType().Name);
+                StateChanged?.Invoke(this, AgentState.Disconnected, exception.GetType().Name);
             }
             finally
             {
@@ -100,37 +120,31 @@ internal sealed class ConnectionWorker : IAsyncDisposable
         demandActive = false;
         using var client = new TcpClient { NoDelay = true };
         await client.ConnectAsync(settings.Host, settings.Port, cancellationToken);
-        stream = client.GetStream();
+        var authenticated = await ConnectionHandshake.ConnectAndAuthenticateAsync(
+            client.GetStream(),
+            settings,
+            cancellationToken);
+        stream = authenticated.Stream;
         lastPongTimestamp = Stopwatch.GetTimestamp();
 
-        var hello = await ConnectionHandshake.ConnectAndAuthenticateAsync(stream, settings, cancellationToken);
+        var hello = authenticated.Hello;
         if (settings.TryCompleteTrust(hello))
         {
             SettingsStore.Save(settings);
             Log.Write("trust_confirmed", hello.Authentication ?? "unknown");
         }
 
-        Log.Write("connected", settings.Host);
-        StateChanged?.Invoke(AgentState.Idle, null);
+        Log.Write("connected");
+        StateChanged?.Invoke(this, paused ? AgentState.Paused : AgentState.Idle, null);
 
-        using var connectionStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var tasks = new[]
-        {
-            ReadLoopAsync(connectionStop.Token),
-            PingLoopAsync(connectionStop.Token),
-            AudioPumpAsync(connectionStop.Token),
-            CaptureRetryLoopAsync(connectionStop.Token),
-        };
-        var completed = await Task.WhenAny(tasks);
-        connectionStop.Cancel();
-        await completed;
-        try
-        {
-            await Task.WhenAll(tasks);
-        }
-        catch (OperationCanceledException) when (connectionStop.IsCancellationRequested)
-        {
-        }
+        await ConnectionTaskGroup.RunUntilFirstCompletionAsync(
+            [
+                ReadLoopAsync,
+                PingLoopAsync,
+                AudioPumpAsync,
+                CaptureRetryLoopAsync,
+            ],
+            cancellationToken);
     }
 
     private async Task ReadLoopAsync(CancellationToken cancellationToken)
@@ -190,19 +204,37 @@ internal sealed class ConnectionWorker : IAsyncDisposable
     {
         await foreach (var pcm in capture.Frames.ReadAllAsync(cancellationToken))
         {
-            if (!capture.IsCapturing || paused || !demandActive)
+            if (!CaptureFrameGate.ShouldSend(
+                frameSessionId: pcm.SessionId,
+                frameGeneration: pcm.Generation,
+                currentSessionId: capture.SessionId,
+                currentGeneration: demandGeneration,
+                isCapturing: capture.IsCapturing,
+                paused: paused,
+                demandActive: demandActive))
             {
                 continue;
             }
             var packet = Ech0Protocol.EncodeAudio(
                 sequence++,
                 AudioCaptureService.MonotonicMilliseconds(),
-                pcm);
+                pcm.Pcm);
             await WritePacketAsync(packet, cancellationToken);
-            if (capture.SessionId != lastLoggedAudioSession)
+            if (pcm.SessionId != lastLoggedAudioSession
+                && CaptureFrameGate.ShouldSend(
+                    frameSessionId: pcm.SessionId,
+                    frameGeneration: pcm.Generation,
+                    currentSessionId: capture.SessionId,
+                    currentGeneration: demandGeneration,
+                    isCapturing: capture.IsCapturing,
+                    paused: paused,
+                    demandActive: demandActive))
             {
-                lastLoggedAudioSession = capture.SessionId;
+                lastLoggedAudioSession = pcm.SessionId;
                 var elapsedMs = (long)Stopwatch.GetElapsedTime(capture.StartTimestamp).TotalMilliseconds;
+                StateChanged?.Invoke(this, AgentState.Capturing, capture.DeviceName);
+                await SendCaptureStatusAsync(
+                    "capturing", null, cancellationToken, pcm.Generation);
                 Log.Write("capture_first_frame_sent", $"{elapsedMs}ms");
             }
         }
@@ -220,6 +252,42 @@ internal sealed class ConnectionWorker : IAsyncDisposable
         }
     }
 
+    private void OnCaptureStoppedUnexpectedly(UnexpectedCaptureStop stoppedCapture)
+    {
+        _ = ReportUnexpectedCaptureStopAsync(stoppedCapture);
+    }
+
+    private async Task ReportUnexpectedCaptureStopAsync(UnexpectedCaptureStop stoppedCapture)
+    {
+        if (!CaptureDemandGate.ShouldReportUnexpectedStop(
+            stoppedSessionId: stoppedCapture.SessionId,
+            stoppedGeneration: stoppedCapture.Generation,
+            currentSessionId: capture.SessionId,
+            currentGeneration: demandGeneration,
+            demandActive: demandActive,
+            paused: paused))
+        {
+            return;
+        }
+
+        StateChanged?.Invoke(this, AgentState.DemandWaitingForDevice, stoppedCapture.ErrorCode);
+        try
+        {
+            await SendCaptureStatusAsync(
+                "error",
+                stoppedCapture.ErrorCode,
+                stop.Token,
+                stoppedCapture.Generation);
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            Log.Write("capture_stop_status_failed", exception.GetType().Name);
+        }
+    }
+
     private async Task ApplyDemandAsync(CancellationToken cancellationToken)
     {
         await captureGate.WaitAsync(cancellationToken);
@@ -228,14 +296,14 @@ internal sealed class ConnectionWorker : IAsyncDisposable
             if (!demandActive)
             {
                 capture.Stop();
-                StateChanged?.Invoke(AgentState.Idle, null);
+                StateChanged?.Invoke(this, AgentState.Idle, null);
                 await SendCaptureStatusAsync("idle", null, cancellationToken);
                 return;
             }
             if (paused)
             {
                 capture.Stop();
-                StateChanged?.Invoke(AgentState.Paused, null);
+                StateChanged?.Invoke(this, AgentState.Paused, null);
                 await SendCaptureStatusAsync("paused", null, cancellationToken);
                 return;
             }
@@ -245,18 +313,23 @@ internal sealed class ConnectionWorker : IAsyncDisposable
             }
 
             await SendCaptureStatusAsync("starting", null, cancellationToken);
+            if (!CaptureDemandGate.ShouldStart(
+                demandActive: demandActive,
+                paused: paused,
+                isCapturing: capture.IsCapturing))
+            {
+                return;
+            }
             try
             {
-                capture.Start(settings.InputDeviceId);
-                StateChanged?.Invoke(AgentState.Capturing, capture.DeviceName);
-                await SendCaptureStatusAsync("capturing", null, cancellationToken);
-                Log.Write("capture_started", capture.DeviceName);
+                capture.Start(settings.InputDeviceId, demandGeneration);
+                Log.Write("capture_started", "requested");
             }
             catch (Exception exception)
             {
                 capture.Stop();
                 var errorCode = exception.GetType().Name;
-                StateChanged?.Invoke(AgentState.DemandWaitingForDevice, errorCode);
+                StateChanged?.Invoke(this, AgentState.DemandWaitingForDevice, errorCode);
                 await SendCaptureStatusAsync("error", errorCode, cancellationToken);
                 Log.Write("capture_unavailable", errorCode);
             }
@@ -267,9 +340,13 @@ internal sealed class ConnectionWorker : IAsyncDisposable
         }
     }
 
-    private Task SendCaptureStatusAsync(string state, string? errorCode, CancellationToken cancellationToken)
+    private Task SendCaptureStatusAsync(
+        string state,
+        string? errorCode,
+        CancellationToken cancellationToken,
+        ulong? generation = null)
         => WriteControlAsync(
-            new CaptureStatus("captureStatus", demandGeneration, state, errorCode),
+            new CaptureStatus("captureStatus", generation ?? demandGeneration, state, errorCode),
             cancellationToken);
 
     private Task WriteControlAsync<T>(T value, CancellationToken cancellationToken)
@@ -309,9 +386,85 @@ internal sealed class ConnectionWorker : IAsyncDisposable
                 Log.Write("shutdown_error", exception.GetType().Name);
             }
         }
+        capture.StoppedUnexpectedly -= OnCaptureStoppedUnexpectedly;
         capture.Dispose();
         writeGate.Dispose();
         captureGate.Dispose();
         stop.Dispose();
     }
+}
+
+internal static class CaptureDemandGate
+{
+    public static bool ShouldStart(bool demandActive, bool paused, bool isCapturing)
+        => demandActive && !paused && !isCapturing;
+
+    public static bool ShouldReportUnexpectedStop(
+        int stoppedSessionId,
+        ulong stoppedGeneration,
+        int currentSessionId,
+        ulong currentGeneration,
+        bool demandActive,
+        bool paused)
+        => demandActive
+            && !paused
+            && stoppedSessionId == currentSessionId
+            && stoppedGeneration == currentGeneration;
+}
+
+internal static class ConnectionTaskGroup
+{
+    public static async Task RunUntilFirstCompletionAsync(
+        IReadOnlyList<Func<CancellationToken, Task>> operations,
+        CancellationToken cancellationToken)
+    {
+        if (operations.Count == 0)
+        {
+            throw new ArgumentException("At least one connection operation is required.", nameof(operations));
+        }
+
+        using var connectionStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var tasks = operations.Select(operation => operation(connectionStop.Token)).ToArray();
+        var completed = await Task.WhenAny(tasks);
+        ExceptionDispatchInfo? primaryFailure = null;
+        try
+        {
+            await completed;
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = ExceptionDispatchInfo.Capture(exception);
+        }
+
+        connectionStop.Cancel();
+        try
+        {
+            await Task.WhenAll(tasks);
+        }
+        catch (OperationCanceledException) when (connectionStop.IsCancellationRequested && primaryFailure is null)
+        {
+        }
+        catch when (primaryFailure is not null)
+        {
+        }
+
+        primaryFailure?.Throw();
+    }
+}
+
+internal static class CaptureFrameGate
+{
+    public static bool ShouldSend(
+        int frameSessionId,
+        ulong frameGeneration,
+        int currentSessionId,
+        ulong currentGeneration,
+        bool isCapturing,
+        bool paused,
+        bool demandActive)
+        => isCapturing
+            && !paused
+            && demandActive
+            && frameSessionId == currentSessionId
+            && frameGeneration == currentGeneration;
 }

@@ -39,6 +39,10 @@ enum SystemAudio {
         allDevices().first { $0.name == name }
     }
 
+    static func deviceWithUID(_ uid: String) -> AudioDeviceDescriptor? {
+        allDevices().first { deviceUID(for: $0.id) == uid }
+    }
+
     static func setDefaultInputDevice(named name: String) throws {
         guard let device = deviceNamed(name) else {
             throw ReceiverError.audioDeviceNotFound(name)
@@ -126,12 +130,27 @@ enum SystemAudio {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        var name: CFString = "" as CFString
-        var size = UInt32(MemoryLayout<CFString>.size)
+        var name: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         let status = AudioObjectGetPropertyData(id, &address, 0, nil, &size, &name)
-        guard status == noErr else {
+        guard status == noErr, let name else {
             return nil
         }
-        return name as String
+        return name.takeRetainedValue() as String
+    }
+
+    private static func deviceUID(for id: AudioDeviceID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var uid: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let status = AudioObjectGetPropertyData(id, &address, 0, nil, &size, &uid)
+        guard status == noErr, let uid else {
+            return nil
+        }
+        return uid.takeRetainedValue() as String
     }
 }
