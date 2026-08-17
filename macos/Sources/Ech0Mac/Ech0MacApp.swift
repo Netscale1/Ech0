@@ -48,10 +48,31 @@ private struct MainWindowContent: View {
 
 @MainActor
 protocol MainWindowPresenting: AnyObject {
+    var isMiniaturizedForPresentation: Bool { get }
+    var isVisibleOnAllSpaces: Bool { get }
+
+    func restoreFromDock()
+    func moveToActiveSpace()
     func presentMainWindow()
 }
 
 extension NSWindow: MainWindowPresenting {
+    var isMiniaturizedForPresentation: Bool {
+        isMiniaturized
+    }
+
+    var isVisibleOnAllSpaces: Bool {
+        collectionBehavior.contains(.canJoinAllSpaces)
+    }
+
+    func restoreFromDock() {
+        deminiaturize(nil)
+    }
+
+    func moveToActiveSpace() {
+        collectionBehavior.insert(.moveToActiveSpace)
+    }
+
     func presentMainWindow() {
         makeKeyAndOrderFront(nil)
     }
@@ -69,6 +90,12 @@ final class MainWindowPresenter {
         guard let existingWindow else {
             recreateWindow?()
             return
+        }
+        if existingWindow.isMiniaturizedForPresentation {
+            existingWindow.restoreFromDock()
+        }
+        if !existingWindow.isVisibleOnAllSpaces {
+            existingWindow.moveToActiveSpace()
         }
         existingWindow.presentMainWindow()
     }
@@ -215,12 +242,12 @@ private final class Ech0AppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
 
     @objc private func showMainWindow() {
         shouldShowMainWindow = true
-        NSApp.activate(ignoringOtherApps: true)
         if mainWindow != nil {
             configureMainWindow()
         } else {
             mainWindowPresenter.show(existingWindow: nil)
         }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func toggleAutomaticCapture() {
