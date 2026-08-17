@@ -4,10 +4,31 @@ import XCTest
 @MainActor
 final class MainWindowPresenterTests: XCTestCase {
     private final class TestWindow: MainWindowPresenting {
-        private(set) var presentationCount = 0
+        enum Event: Equatable {
+            case restoreFromDock
+            case moveToActiveSpace
+            case present
+        }
+
+        let isMiniaturizedForPresentation: Bool
+        let isVisibleOnAllSpaces: Bool
+        private(set) var events: [Event] = []
+
+        init(isMiniaturized: Bool = false, isVisibleOnAllSpaces: Bool = false) {
+            isMiniaturizedForPresentation = isMiniaturized
+            self.isVisibleOnAllSpaces = isVisibleOnAllSpaces
+        }
+
+        func restoreFromDock() {
+            events.append(.restoreFromDock)
+        }
+
+        func moveToActiveSpace() {
+            events.append(.moveToActiveSpace)
+        }
 
         func presentMainWindow() {
-            presentationCount += 1
+            events.append(.present)
         }
     }
 
@@ -33,7 +54,25 @@ final class MainWindowPresenterTests: XCTestCase {
 
         presenter.show(existingWindow: window)
 
-        XCTAssertEqual(window.presentationCount, 1)
+        XCTAssertEqual(window.events, [.moveToActiveSpace, .present])
         XCTAssertEqual(recreationRequests, 0)
+    }
+
+    func testRestoresMiniaturizedWindowBeforePresenting() {
+        let presenter = MainWindowPresenter()
+        let window = TestWindow(isMiniaturized: true)
+
+        presenter.show(existingWindow: window)
+
+        XCTAssertEqual(window.events, [.restoreFromDock, .moveToActiveSpace, .present])
+    }
+
+    func testKeepsAllSpacesWindowBehaviorWhenPresenting() {
+        let presenter = MainWindowPresenter()
+        let window = TestWindow(isVisibleOnAllSpaces: true)
+
+        presenter.show(existingWindow: window)
+
+        XCTAssertEqual(window.events, [.present])
     }
 }

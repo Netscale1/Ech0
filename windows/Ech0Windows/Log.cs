@@ -9,6 +9,11 @@ internal static class Log
         "logs");
     public static string CurrentPath => Path.Combine(DirectoryPath, "ech0.log");
 
+    internal static string SafeExceptionType(Exception exception) => exception.GetType().Name;
+
+    internal static string SafeAuthentication(string? authentication)
+        => authentication is "pairing" or "trusted" ? authentication : "unknown";
+
     public static void Write(string eventName, string? detail = null)
     {
         _ = TryWrite(() =>

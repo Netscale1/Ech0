@@ -44,4 +44,57 @@ final class ReceiverCaptureGateTests: XCTestCase {
             "capturing"
         )
     }
+
+    func testSystemInputConsumerActivatesCaptureWithoutAppSpecificSignals() {
+        XCTAssertTrue(
+            SystemCapturePolicy.isCaptureDemandActive(
+                inputConsumerActive: true,
+                manualFallbackActive: false,
+                automaticDetectionAvailable: true,
+                automaticCapturePaused: false
+            )
+        )
+    }
+
+    func testManualFallbackIsAvailableOnlyWhenSystemDetectionIsUnavailable() {
+        XCTAssertTrue(
+            SystemCapturePolicy.allowsManualFallback(
+                automaticDetectionAvailable: false,
+                automaticCapturePaused: false
+            )
+        )
+        XCTAssertFalse(
+            SystemCapturePolicy.allowsManualFallback(
+                automaticDetectionAvailable: true,
+                automaticCapturePaused: false
+            )
+        )
+        XCTAssertTrue(
+            SystemCapturePolicy.isCaptureDemandActive(
+                inputConsumerActive: false,
+                manualFallbackActive: true,
+                automaticDetectionAvailable: false,
+                automaticCapturePaused: false
+            )
+        )
+        XCTAssertFalse(
+            SystemCapturePolicy.isCaptureDemandActive(
+                inputConsumerActive: false,
+                manualFallbackActive: true,
+                automaticDetectionAvailable: true,
+                automaticCapturePaused: false
+            )
+        )
+    }
+
+    func testPauseBlocksAutomaticAndManualCaptureDemand() {
+        XCTAssertFalse(
+            SystemCapturePolicy.isCaptureDemandActive(
+                inputConsumerActive: true,
+                manualFallbackActive: true,
+                automaticDetectionAvailable: false,
+                automaticCapturePaused: true
+            )
+        )
+    }
 }

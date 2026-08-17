@@ -132,6 +132,112 @@ public sealed class ProtocolTests
     }
 
     [Fact]
+    public void LegacyTrustedPairingCandidatePreservesSenderIdentityAndSecret()
+    {
+        var settings = new Ech0Settings
+        {
+            Host = "mac.local",
+            SenderId = "legacy-sender",
+            ProtectedTrustedSecret = SettingsStore.Protect("legacy-secret"),
+            ReceiverId = "receiver-1",
+            TrustConfirmed = true,
+        };
+
+        var candidate = settings.CreatePairingCandidate(
+            "mac.local",
+            48_484,
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+
+        Assert.Equal(settings.SenderId, candidate.SenderId);
+        Assert.Equal(settings.TrustedSecret, candidate.TrustedSecret);
+    }
+
+    [Fact]
+    public void NewPairingCandidateGeneratesSenderIdentityAndSecret()
+    {
+        var settings = new Ech0Settings
+        {
+            SenderId = "unused-sender",
+            ProtectedTrustedSecret = SettingsStore.Protect("unused-secret"),
+        };
+
+        var candidate = settings.CreatePairingCandidate(
+            "mac.local",
+            48_484,
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+
+        Assert.NotEqual(settings.SenderId, candidate.SenderId);
+        Assert.NotEqual(settings.TrustedSecret, candidate.TrustedSecret);
+    }
+
+    [Fact]
+    public void PinnedTrustedPairingCandidateRotatesSenderIdentityAndSecret()
+    {
+        var settings = new Ech0Settings
+        {
+            Host = "old-mac.local",
+            SenderId = "trusted-sender",
+            ProtectedTrustedSecret = SettingsStore.Protect("trusted-secret"),
+            ReceiverId = "receiver-1",
+            ReceiverKeyHash = "key-hash",
+            TrustConfirmed = true,
+        };
+
+        var candidate = settings.CreatePairingCandidate(
+            "new-mac.local",
+            48_484,
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+
+        Assert.NotEqual(settings.SenderId, candidate.SenderId);
+        Assert.NotEqual(settings.TrustedSecret, candidate.TrustedSecret);
+    }
+
+    [Fact]
+    public void CompletedLegacyPairingPersistsReceiverPinAndReturnsToTrusted()
+    {
+        var settings = new Ech0Settings
+        {
+            Host = "mac.local",
+            SenderId = "legacy-sender",
+            ProtectedTrustedSecret = SettingsStore.Protect("legacy-secret"),
+            ReceiverId = "receiver-1",
+            TrustConfirmed = true,
+        };
+        var candidate = settings.CreatePairingCandidate(
+            "mac.local",
+            48_484,
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+        var hello = new ServerHello(
+            "serverHello", true, null, 60, 3, ["remoteCaptureControl", "secureTransportV3"],
+            "receiver-1", "Mac mini", "key-hash", "pairing", true);
+
+        Assert.True(candidate.TryCompleteTrust(hello));
+        var persisted = JsonSerializer.Deserialize<Ech0Settings>(
+            JsonSerializer.Serialize(candidate));
+
+        Assert.NotNull(persisted);
+        Assert.Equal("legacy-sender", persisted.SenderId);
+        Assert.Equal("key-hash", persisted.ReceiverKeyHash);
+        Assert.Equal(PairingState.Trusted, persisted.PairingState);
+        Assert.Empty(persisted.ProtectedPairingToken);
+    }
+
+    [Fact]
+    public void PairingDiagnosticsNeverIncludeCredentials()
+    {
+        const string secret = "trusted-secret-value";
+        var failure = new InvalidOperationException($"pairing failed: {secret}");
+
+        var failureDetail = Log.SafeExceptionType(failure);
+        var authenticationDetail = Log.SafeAuthentication(secret);
+
+        Assert.Equal(nameof(InvalidOperationException), failureDetail);
+        Assert.Equal("unknown", authenticationDetail);
+        Assert.DoesNotContain(secret, failureDetail);
+        Assert.DoesNotContain(secret, authenticationDetail);
+    }
+
+    [Fact]
     public void PairingCodeRequiresHighEntropyBase32Value()
     {
         Assert.Equal(

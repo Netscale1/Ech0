@@ -29,6 +29,26 @@ list type that the Core Audio host can marshal across its process boundary.
 `BlackHole 2ch` remains a compatibility fallback when the dedicated device is
 not available.
 
+## System-wide activation
+
+Ech0Mac observes Core Audio process objects and activates Windows capture when
+any process reports active input I/O on the exact device prepared by
+`AudioOutputEngine`. The normal target is `Ech0 Virtual Microphone`; if the
+dedicated driver is unavailable, the monitor follows the `BlackHole 2ch`
+fallback instead.
+
+This is device-level, not application-specific. Ech0Mac does not inspect Codex
+controls, poll Accessibility, or monitor a global keyboard shortcut. An
+application that opens the microphone for a live preview is therefore an active
+consumer even before it starts saving a recording; Core Audio cannot expose an
+application's private semantic distinction between preview and record.
+
+The monitor uses asynchronous property-listener callbacks for the Core Audio
+process list, per-process input-running state, and per-process device list.
+Ech0 itself is excluded from the consumer set so the bridge cannot trigger
+itself. Parsec is treated like every other process: its independent playback
+route does not count, while a real request for the Ech0 input does.
+
 Relevant implementation:
 
 - `macos/Sources/Ech0Mac/VirtualMicrophoneWriter.swift`

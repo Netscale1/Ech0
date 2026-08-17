@@ -38,6 +38,26 @@ struct ReceiverPresentationPolicy {
     }
 }
 
+struct SystemCapturePolicy {
+    static func allowsManualFallback(
+        automaticDetectionAvailable: Bool,
+        automaticCapturePaused: Bool
+    ) -> Bool {
+        !automaticDetectionAvailable && !automaticCapturePaused
+    }
+
+    static func isCaptureDemandActive(
+        inputConsumerActive: Bool,
+        manualFallbackActive: Bool,
+        automaticDetectionAvailable: Bool,
+        automaticCapturePaused: Bool
+    ) -> Bool {
+        guard !automaticCapturePaused else { return false }
+        return inputConsumerActive
+            || (manualFallbackActive && !automaticDetectionAvailable)
+    }
+}
+
 @MainActor
 final class ReceiverViewModel: ObservableObject {
     @Published var clientName: String?
@@ -52,12 +72,12 @@ final class ReceiverViewModel: ObservableObject {
     @Published private(set) var connectedSenderId: String?
     @Published private(set) var inputConsumers: [String] = []
     @Published private(set) var remoteCaptureState = "idle"
-    @Published private(set) var codexShortcutCaptureActive = false
-    @Published private(set) var codexAccessibilityState: CodexDictationAccessibilityState = .unavailable
+    @Published private(set) var manualCaptureActive = false
+    @Published private(set) var captureDeviceName = "Audio input"
     @Published var automaticCapturePaused = false {
         didSet { updateCaptureDemand() }
     }
-    @Published private(set) var automaticDetectionAvailable = true
+    @Published private(set) var automaticDetectionAvailable = false
     @Published private(set) var launchAtLoginEnabled = false
 
     let blackHoleDeviceName = "BlackHole 2ch"
@@ -70,8 +90,6 @@ final class ReceiverViewModel: ObservableObject {
     private let receiverIdentity: ReceiverIdentity
     private let receiverIdentityError: Error?
     private let inputDemandMonitor = AudioInputDemandMonitor()
-    private let codexAccessibilityMonitor = CodexDictationAccessibilityMonitor()
-    private let codexShortcutMonitor = CodexDictationShortcutMonitor()
     private let server: ReceiverServer
     private var metricsTimer: DispatchSourceTimer?
     private var captureDemandWasActive = false
@@ -107,13 +125,8 @@ final class ReceiverViewModel: ObservableObject {
         refreshTrustedDevices()
         refreshBlackHoleStatus()
         startMetricsTimer()
-        restartReceiver()
         bindInputDemandMonitor()
-        automaticDetectionAvailable = inputDemandMonitor.start(deviceNamed: blackHoleDeviceName)
-        bindCodexAccessibilityMonitor()
-        codexAccessibilityMonitor.start()
-        bindCodexShortcutMonitor()
-        codexShortcutMonitor.start()
+        restartReceiver()
         refreshLaunchAtLoginStatus()
     }
 
@@ -122,8 +135,6 @@ final class ReceiverViewModel: ObservableObject {
         server.stop()
         audioEngine.stop()
         inputDemandMonitor.stop()
-        codexAccessibilityMonitor.stop()
-        codexShortcutMonitor.stop()
     }
 
     func refreshHostAddress() {
@@ -142,6 +153,9 @@ final class ReceiverViewModel: ObservableObject {
         refreshBlackHoleStatus()
 
         server.stop()
+        inputDemandMonitor.stop()
+        inputConsumers = []
+        automaticDetectionAvailable = false
         audioEngine.stop()
         metrics.update(ReceiverMetrics())
         clientName = nil
@@ -162,6 +176,7 @@ final class ReceiverViewModel: ObservableObject {
         do {
             try synchronizeBlackHoleDevice()
             try audioEngine.prepare(deviceNamed: blackHoleDeviceName)
+            restartInputDemandMonitor()
             try audioEngine.start()
             try server.start()
             connectionLabel = "Waiting for sender"
@@ -180,11 +195,11 @@ final class ReceiverViewModel: ObservableObject {
         appendLog("Generated a new pairing code.")
     }
 
-    func setBlackHoleAsSystemInput() {
+    func setCaptureDeviceAsSystemInput() {
         do {
             try synchronizeBlackHoleDevice()
-            try SystemAudio.setDefaultInputDevice(named: blackHoleDeviceName)
-            appendLog("Set \(blackHoleDeviceName) as the default system input.")
+            try SystemAudio.setDefaultInputDevice(named: captureDeviceName)
+            appendLog("Set \(captureDeviceName) as the default system input.")
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -205,29 +220,19 @@ final class ReceiverViewModel: ObservableObject {
     }
 
     var isCaptureDemandActive: Bool {
-        CodexCapturePolicy.isCaptureDemandActive(
-            accessibilityState: codexAccessibilityState,
-            manualFallbackActive: codexShortcutCaptureActive,
-            independentInputConsumerActive: inputConsumers.contains {
-                !Self.isPersistentCodexConsumer($0)
-            },
+        SystemCapturePolicy.isCaptureDemandActive(
+            inputConsumerActive: !inputConsumers.isEmpty,
+            manualFallbackActive: manualCaptureActive,
+            automaticDetectionAvailable: automaticDetectionAvailable,
             automaticCapturePaused: automaticCapturePaused
         )
     }
 
-    var canUseCodexManualFallback: Bool {
-        CodexCapturePolicy.allowsManualFallback(
-            accessibilityState: codexAccessibilityState,
+    var canUseManualFallback: Bool {
+        SystemCapturePolicy.allowsManualFallback(
+            automaticDetectionAvailable: automaticDetectionAvailable,
             automaticCapturePaused: automaticCapturePaused
         )
-    }
-
-    var isWaitingForCodexDictation: Bool {
-        !automaticCapturePaused
-            && !codexAccessibilityState.isActive
-            && !codexShortcutCaptureActive
-            && inputConsumers.contains(where: Self.isPersistentCodexConsumer)
-            && !inputConsumers.contains { !Self.isPersistentCodexConsumer($0) }
     }
 
     var menuBarSymbolName: String {
@@ -246,23 +251,15 @@ final class ReceiverViewModel: ObservableObject {
     func toggleAutomaticCapturePause() {
         automaticCapturePaused.toggle()
         if automaticCapturePaused {
-            codexShortcutCaptureActive = false
+            manualCaptureActive = false
         }
     }
 
-    func toggleCodexShortcutCapture() {
-        guard codexShortcutCaptureActive || canUseCodexManualFallback else { return }
-        codexShortcutCaptureActive.toggle()
-        appendLog(codexShortcutCaptureActive ? "Codex dictation requested." : "Codex dictation ended.")
+    func toggleManualCapture() {
+        guard manualCaptureActive || canUseManualFallback else { return }
+        manualCaptureActive.toggle()
+        appendLog(manualCaptureActive ? "Manual capture requested." : "Manual capture ended.")
         updateCaptureDemand()
-    }
-
-    func openAccessibilitySettings() {
-        codexAccessibilityMonitor.requestPermission()
-        guard let url = URL(
-            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-        ) else { return }
-        NSWorkspace.shared.open(url)
     }
 
     func setLaunchAtLogin(enabled: Bool) {
@@ -372,13 +369,10 @@ final class ReceiverViewModel: ObservableObject {
         inputDemandMonitor.onConsumersChanged = { [weak self] consumers in
             guard let self else { return }
             self.inputConsumers = consumers
-            if consumers.contains(where: Self.isPersistentCodexConsumer) {
-                self.codexAccessibilityMonitor.requestPriorityRescan()
-            }
             self.appendLog(
                 consumers.isEmpty
-                    ? "No application is using BlackHole input."
-                    : "BlackHole input requested by \(consumers.joined(separator: ", "))."
+                    ? "No application is using \(self.captureDeviceName)."
+                    : "\(self.captureDeviceName) requested by \(consumers.joined(separator: ", "))."
             )
             self.updateCaptureDemand()
         }
@@ -390,33 +384,24 @@ final class ReceiverViewModel: ObservableObject {
         }
     }
 
-    private func bindCodexShortcutMonitor() {
-        codexShortcutMonitor.onToggle = { [weak self] in
-            guard let self, self.canUseCodexManualFallback else { return }
-            self.toggleCodexShortcutCapture()
+    private func restartInputDemandMonitor() {
+        inputDemandMonitor.stop()
+        inputConsumers = []
+        guard let device = audioEngine.outputDevice else {
+            captureDeviceName = "Audio input"
+            automaticDetectionAvailable = false
+            updateCaptureDemand()
+            return
         }
-    }
-
-    private func bindCodexAccessibilityMonitor() {
-        codexAccessibilityMonitor.onStateChanged = { [weak self] state in
-            guard let self else { return }
-            let wasActive = self.codexAccessibilityState.isActive
-            self.codexAccessibilityState = state
-            if state.isAvailable {
-                self.codexShortcutCaptureActive = false
-            }
-
-            if state.isActive != wasActive {
-                self.appendLog(
-                    state.isActive
-                        ? "Codex dictation detected."
-                        : "Codex dictation ended."
-                )
-            } else if state == .permissionRequired {
-                self.appendLog("Accessibility access is required for automatic Codex detection.")
-            }
-            self.updateCaptureDemand()
-        }
+        captureDeviceName = device.name
+        manualCaptureActive = false
+        automaticDetectionAvailable = inputDemandMonitor.start(device: device)
+        appendLog(
+            automaticDetectionAvailable
+                ? "Monitoring system input demand on \(device.name)."
+                : "System input monitoring unavailable for \(device.name)."
+        )
+        updateCaptureDemand()
     }
 
     private func updateCaptureDemand() {
@@ -429,7 +414,7 @@ final class ReceiverViewModel: ObservableObject {
                     try audioEngine.start()
                 } catch {
                     errorMessage = error.localizedDescription
-                    appendLog("Failed to start BlackHole output: \(error.localizedDescription)")
+                    appendLog("Failed to start \(captureDeviceName) output: \(error.localizedDescription)")
                 }
                 appendLog("Capture demand sent to Windows.")
             } else {
@@ -464,10 +449,13 @@ final class ReceiverViewModel: ObservableObject {
             connectionLabel = "Waiting for sender"
             clientName = nil
             connectedSenderId = nil
-            audioEngine.stop()
             do {
-                try audioEngine.prepare(deviceNamed: blackHoleDeviceName)
+                if audioEngine.outputDevice == nil {
+                    try audioEngine.prepare(deviceNamed: blackHoleDeviceName)
+                    restartInputDemandMonitor()
+                }
                 try audioEngine.start()
+                errorMessage = nil
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -534,10 +522,6 @@ final class ReceiverViewModel: ObservableObject {
         }
         let rms = sqrt(sumOfSquares / Double(samples.count))
         return min(1, rms * 4)
-    }
-
-    private static func isPersistentCodexConsumer(_ label: String) -> Bool {
-        label == "com.openai.codex.helper"
     }
 
     private func appendLog(_ line: String) {

@@ -131,7 +131,7 @@ internal sealed class ConnectionWorker : IAsyncDisposable
         if (settings.TryCompleteTrust(hello))
         {
             SettingsStore.Save(settings);
-            Log.Write("trust_confirmed", hello.Authentication ?? "unknown");
+            Log.Write("trust_confirmed", Log.SafeAuthentication(hello.Authentication));
         }
 
         Log.Write("connected");

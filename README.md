@@ -8,7 +8,7 @@ Ech0 is a local-network microphone bridge. A Windows PC captures live voice audi
 - `windows/`: Windows x64 tray agent built with .NET 10, WinForms, NAudio, and WASAPI shared mode.
 - `docs/protocol.md`: transport and control message specification shared by the Windows and macOS apps.
 - `docs/setup.md`: installation and manual setup notes, especially for `BlackHole 2ch`.
-- `docs/windows-codex-setup.md`: complete Windows-to-Mac Codex setup, permissions, pairing, updates, and verification.
+- `docs/windows-codex-setup.md`: complete Windows-to-Mac microphone setup, permissions, pairing, updates, and verification.
 - `docs/macos-audio-bridge.md`: input-only virtual microphone architecture, Parsec isolation, performance findings, and the operator checklist.
 - `docs/macos-release.md`: self-contained macOS build, validation, signing, packaging, rollback, and notarization guide.
 - `docs/release.md`: test-first build gates, CI, signed Windows releases, and updater integrity.
@@ -52,4 +52,4 @@ are separate fail-closed commands documented in `docs/macos-release.md`.
 6. Copy the security code shown by Ech0Mac into the Windows pairing window.
 7. Keep “Start Ech0 with Windows” enabled if the agent should reconnect automatically.
 
-The Windows agent stays connected while idle. It opens the selected Windows input in WASAPI shared mode only when a Mac application actively uses `BlackHole 2ch`. Protocol v3 encrypts credentials, control traffic, and audio and pins the Mac identity after first pairing. Existing plaintext v2 associations intentionally require one new pairing after upgrade.
+The Windows agent stays connected while idle. It opens the selected Windows input in WASAPI shared mode only when a Mac application actively uses the input device prepared by Ech0Mac: normally `Ech0 Virtual Microphone`, with `BlackHole 2ch` as a compatibility fallback. Protocol v3 encrypts credentials, control traffic, and audio and pins the Mac identity after first pairing. Existing plaintext v2 associations intentionally require one new pairing after upgrade.

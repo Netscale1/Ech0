@@ -48,10 +48,31 @@ private struct MainWindowContent: View {
 
 @MainActor
 protocol MainWindowPresenting: AnyObject {
+    var isMiniaturizedForPresentation: Bool { get }
+    var isVisibleOnAllSpaces: Bool { get }
+
+    func restoreFromDock()
+    func moveToActiveSpace()
     func presentMainWindow()
 }
 
 extension NSWindow: MainWindowPresenting {
+    var isMiniaturizedForPresentation: Bool {
+        isMiniaturized
+    }
+
+    var isVisibleOnAllSpaces: Bool {
+        collectionBehavior.contains(.canJoinAllSpaces)
+    }
+
+    func restoreFromDock() {
+        deminiaturize(nil)
+    }
+
+    func moveToActiveSpace() {
+        collectionBehavior.insert(.moveToActiveSpace)
+    }
+
     func presentMainWindow() {
         makeKeyAndOrderFront(nil)
     }
@@ -69,6 +90,12 @@ final class MainWindowPresenter {
         guard let existingWindow else {
             recreateWindow?()
             return
+        }
+        if existingWindow.isMiniaturizedForPresentation {
+            existingWindow.restoreFromDock()
+        }
+        if !existingWindow.isVisibleOnAllSpaces {
+            existingWindow.moveToActiveSpace()
         }
         existingWindow.presentMainWindow()
     }
@@ -152,8 +179,10 @@ private final class Ech0AppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
         menu.removeAllItems()
         menu.addItem(informationalItem(model.connectionLabel))
         menu.addItem(informationalItem("Windows capture: \(model.remoteCaptureState)"))
-        menu.addItem(informationalItem("BlackHole consumers: \(model.inputConsumers.count)"))
-        menu.addItem(informationalItem("Codex detection: \(model.codexAccessibilityState.label)"))
+        menu.addItem(informationalItem("\(model.captureDeviceName) consumers: \(model.inputConsumers.count)"))
+        menu.addItem(informationalItem(
+            "System detection: \(model.automaticDetectionAvailable ? "ready" : "unavailable")"
+        ))
         menu.addItem(.separator())
         menu.addItem(actionItem("Open Ech0", action: #selector(showMainWindow)))
         menu.addItem(actionItem(
@@ -162,18 +191,11 @@ private final class Ech0AppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
         ))
 
         let manualItem = actionItem(
-            model.codexShortcutCaptureActive ? "Stop manual capture" : "Start manually",
+            model.manualCaptureActive ? "Stop manual capture" : "Start manually",
             action: #selector(toggleManualCapture)
         )
-        manualItem.isEnabled = model.canUseCodexManualFallback || model.codexShortcutCaptureActive
+        manualItem.isEnabled = model.canUseManualFallback || model.manualCaptureActive
         menu.addItem(manualItem)
-
-        if model.codexAccessibilityState == .permissionRequired {
-            menu.addItem(actionItem(
-                "Open Accessibility Settings",
-                action: #selector(openAccessibilitySettings)
-            ))
-        }
 
         let launchItem = actionItem("Launch at login", action: #selector(toggleLaunchAtLogin))
         launchItem.state = model.launchAtLoginEnabled ? .on : .off
@@ -220,12 +242,12 @@ private final class Ech0AppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
 
     @objc private func showMainWindow() {
         shouldShowMainWindow = true
-        NSApp.activate(ignoringOtherApps: true)
         if mainWindow != nil {
             configureMainWindow()
         } else {
             mainWindowPresenter.show(existingWindow: nil)
         }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func toggleAutomaticCapture() {
@@ -233,11 +255,7 @@ private final class Ech0AppDelegate: NSObject, NSApplicationDelegate, NSMenuDele
     }
 
     @objc private func toggleManualCapture() {
-        model.toggleCodexShortcutCapture()
-    }
-
-    @objc private func openAccessibilitySettings() {
-        model.openAccessibilitySettings()
+        model.toggleManualCapture()
     }
 
     @objc private func toggleLaunchAtLogin() {
