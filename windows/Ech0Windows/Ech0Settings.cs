@@ -85,13 +85,21 @@ internal sealed class Ech0Settings
 
     public Ech0Settings CreatePairingCandidate(string host, int port, string pairingToken)
     {
+        var preserveLegacyIdentity = TrustConfirmed
+            && !string.IsNullOrWhiteSpace(ReceiverId)
+            && string.IsNullOrWhiteSpace(ReceiverKeyHash)
+            && string.Equals(Host, host, StringComparison.OrdinalIgnoreCase)
+            && Port == port
+            && !string.IsNullOrWhiteSpace(SenderId)
+            && !string.IsNullOrWhiteSpace(ProtectedTrustedSecret);
         var candidate = new Ech0Settings
         {
             Host = host,
             Port = port,
             DeviceName = DeviceName,
             InputDeviceId = InputDeviceId,
-            SenderId = Guid.NewGuid().ToString("D"),
+            SenderId = preserveLegacyIdentity ? SenderId : Guid.NewGuid().ToString("D"),
+            ProtectedTrustedSecret = preserveLegacyIdentity ? ProtectedTrustedSecret : "",
             LaunchAtLogin = LaunchAtLogin,
         };
         _ = candidate.TrustedSecret;

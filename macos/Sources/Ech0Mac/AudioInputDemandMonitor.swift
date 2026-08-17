@@ -30,7 +30,7 @@ final class AudioInputDemandMonitor: @unchecked Sendable {
 
     init(
         stopDelay: TimeInterval = 2,
-        ignoredBundleIdentifiers: Set<String> = ["net.ech0.mac", "tv.parsec.www"]
+        ignoredBundleIdentifiers: Set<String> = ["net.ech0.mac"]
     ) {
         self.stopDelay = stopDelay
         self.ignoredBundleIdentifiers = ignoredBundleIdentifiers
@@ -40,17 +40,24 @@ final class AudioInputDemandMonitor: @unchecked Sendable {
     @discardableResult
     func start(deviceNamed name: String = "BlackHole 2ch") -> Bool {
         syncOnQueue {
-            startOnQueue(deviceNamed: name)
+            guard !isStarted else { return targetDeviceID != nil }
+            guard let device = SystemAudio.deviceNamed(name) else {
+                return failStartOnQueue()
+            }
+            return startOnQueue(device: device)
         }
     }
 
-    private func startOnQueue(deviceNamed name: String) -> Bool {
+    @discardableResult
+    func start(device: AudioDeviceDescriptor) -> Bool {
+        syncOnQueue {
+            startOnQueue(device: device)
+        }
+    }
+
+    private func startOnQueue(device: AudioDeviceDescriptor) -> Bool {
         guard !isStarted else { return targetDeviceID != nil }
         isStarted = true
-
-        guard let device = SystemAudio.deviceNamed(name) else {
-            return failStartOnQueue()
-        }
         targetDeviceID = device.id
 
         let system = AudioObjectID(bitPattern: kAudioObjectSystemObject)

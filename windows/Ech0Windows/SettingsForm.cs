@@ -253,7 +253,7 @@ internal sealed class SettingsForm : Form
         }
         catch (Exception exception)
         {
-            Log.Write("pairing_failed", exception.GetType().Name);
+            Log.Write("pairing_failed", Log.SafeExceptionType(exception));
             if (IsDisposed || Disposing)
             {
                 return;

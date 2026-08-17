@@ -83,14 +83,9 @@ struct ContentView: View {
 
             Spacer()
 
-            if model.codexAccessibilityState == .permissionRequired {
-                Button("Open Accessibility Settings") {
-                    model.openAccessibilitySettings()
-                }
-                .controlSize(.large)
-            } else if model.canUseCodexManualFallback || model.codexShortcutCaptureActive {
-                Button(model.codexShortcutCaptureActive ? "Stop manual" : "Start manually") {
-                    model.toggleCodexShortcutCapture()
+            if model.canUseManualFallback || model.manualCaptureActive {
+                Button(model.manualCaptureActive ? "Stop manual" : "Start manually") {
+                    model.toggleManualCapture()
                 }
                 .controlSize(.large)
             }
@@ -119,8 +114,8 @@ struct ContentView: View {
 
                 endpoint(
                     symbol: "circle.circle",
-                    title: model.blackHoleDeviceName,
-                    detail: model.isBlackHoleAvailable ? "Ready" : "Missing"
+                    title: model.captureDeviceName,
+                    detail: model.automaticDetectionAvailable ? "System monitoring" : "Manual fallback"
                 )
             }
 
@@ -271,7 +266,9 @@ struct ContentView: View {
 
             HStack {
                 Button("Restart receiver") { model.restartReceiver() }
-                Button("Set BlackHole as input") { model.setBlackHoleAsSystemInput() }
+                Button("Set \(model.captureDeviceName) as input") {
+                    model.setCaptureDeviceAsSystemInput()
+                }
                 Spacer()
                 Button("Copy log") {
                     copyToPasteboard(model.logs.joined(separator: "\n"))
@@ -381,7 +378,7 @@ struct ContentView: View {
     private var connectionDetail: String {
         if let errorMessage = model.errorMessage { return errorMessage }
         return model.isBlackHoleAvailable
-            ? "\(model.host):\(model.port) · \(model.blackHoleDeviceName) ready"
+            ? "\(model.host):\(model.port) · \(model.captureDeviceName) ready"
             : "\(model.blackHoleDeviceName) missing"
     }
 
@@ -400,10 +397,7 @@ struct ContentView: View {
 
     private var captureLabel: String {
         if model.automaticCapturePaused { return "Paused" }
-        if model.codexAccessibilityState.isActive { return "Codex dictation" }
-        if model.codexShortcutCaptureActive { return "Manual fallback" }
-        if model.codexAccessibilityState == .permissionRequired { return "Allow Accessibility" }
-        if model.isWaitingForCodexDictation { return "Waiting for Codex" }
+        if model.manualCaptureActive { return "Manual fallback" }
         if isCapturing { return "Active" }
         return model.inputConsumers.isEmpty ? "Automatic" : "Requested"
     }
@@ -453,7 +447,7 @@ private struct ReceiverDiagnosticsMetrics: View {
             MetricColumn(rows: [
                 ("Stale drops", "\(metrics.value.staleDrops)"),
                 ("Last sequence", metrics.value.lastSequence.map(String.init) ?? "—"),
-                ("BlackHole consumers", "\(consumerCount)"),
+                ("Input consumers", "\(consumerCount)"),
                 ("Windows capture", remoteCaptureState),
             ])
         }

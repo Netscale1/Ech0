@@ -1,13 +1,13 @@
 # Setup Notes
 
-For the complete Windows-to-Mac Codex workflow, see [Windows → Mac Codex setup](windows-codex-setup.md).
+For the complete Windows-to-Mac microphone workflow, see [Windows → Mac setup](windows-codex-setup.md).
 
 ## macOS
 
 1. Install `BlackHole 2ch` from the upstream project: [BlackHole](https://github.com/ExistentialAudio/BlackHole)
 2. Open Audio MIDI Setup and confirm `BlackHole 2ch` appears as an input/output device.
 3. Build and run the app in `macos/`.
-4. Use the app button to set `BlackHole 2ch` as the current system input device when needed.
+4. Use the app button to set the input device prepared by Ech0Mac as the current system input when needed. With the dedicated driver installed, this is `Ech0 Virtual Microphone`.
 
 ## Windows
 
@@ -17,7 +17,7 @@ For the complete Windows-to-Mac Codex workflow, see [Windows → Mac Codex setup
 4. Enter the pairing code shown in Ech0Mac.
 5. After trust is confirmed, Windows deletes the one-time code and reconnects using the saved receiver and sender identities.
 6. Ech0 installs no driver and requires no administrator rights. When enabled, launch-at-login is registered for the current user under the standard Windows Run key.
-7. The selected Windows capture endpoint is opened only while a Mac app uses BlackHole. If that endpoint is unavailable, Ech0 waits instead of silently switching microphones.
+7. The selected Windows capture endpoint is opened only while a Mac app actively acquires from the input device prepared by Ech0Mac. If that endpoint is unavailable, Ech0 waits instead of silently switching microphones.
 
 ## Networking
 
