@@ -104,8 +104,8 @@ public sealed class AudioCaptureServiceTests
         Assert.Equal(nameof(IOException), observed.ErrorCode);
         Assert.False(service.IsCapturing);
         Assert.Null(service.DeviceName);
-        Assert.False(recorder.DisposedDuringStoppedCallback);
         Assert.True(SpinWait.SpinUntil(() => recorder.Disposed, TimeSpan.FromSeconds(2)));
+        Assert.NotEqual(recorder.RecordingStoppedThreadId, recorder.DisposeThreadId);
 
         service.Start(null, 13);
 
@@ -151,7 +151,7 @@ public sealed class AudioCaptureServiceTests
 
     private sealed class FakeAudioRecorder(string deviceName) : IAudioRecorder
     {
-        private bool raisingStopped;
+        private int disposed;
 
         public event AudioRecorderDataAvailableHandler? DataAvailable;
         public event Action<IAudioRecorder, Exception?>? RecordingStopped;
@@ -161,8 +161,9 @@ public sealed class AudioCaptureServiceTests
         public bool RaiseStoppedWhenStopRequested { get; init; }
         public int StartCount { get; private set; }
         public int StopCount { get; private set; }
-        public bool Disposed { get; private set; }
-        public bool DisposedDuringStoppedCallback { get; private set; }
+        public bool Disposed => Volatile.Read(ref disposed) == 1;
+        public int? RecordingStoppedThreadId { get; private set; }
+        public int? DisposeThreadId { get; private set; }
 
         public void StartRecording()
         {
@@ -186,21 +187,14 @@ public sealed class AudioCaptureServiceTests
 
         public void RaiseStopped(Exception? exception)
         {
-            raisingStopped = true;
-            try
-            {
-                RecordingStopped?.Invoke(this, exception);
-            }
-            finally
-            {
-                raisingStopped = false;
-            }
+            RecordingStoppedThreadId = Environment.CurrentManagedThreadId;
+            RecordingStopped?.Invoke(this, exception);
         }
 
         public void Dispose()
         {
-            DisposedDuringStoppedCallback |= raisingStopped;
-            Disposed = true;
+            DisposeThreadId = Environment.CurrentManagedThreadId;
+            Volatile.Write(ref disposed, 1);
         }
     }
 }
