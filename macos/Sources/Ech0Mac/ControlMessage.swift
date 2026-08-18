@@ -69,6 +69,7 @@ struct CaptureStatus: Codable, Sendable {
 struct PingMessage: Codable, Sendable {
     private(set) var kind = "ping"
     let monotonicMs: UInt64
+    let roundTripMs: Int?
 }
 
 struct PongMessage: Codable, Sendable {

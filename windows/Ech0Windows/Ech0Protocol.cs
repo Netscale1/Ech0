@@ -144,6 +144,6 @@ internal sealed record ServerHello(
 
 internal sealed record CaptureDemand(string Kind, bool Active, ulong Generation);
 internal sealed record CaptureStatus(string Kind, ulong Generation, string State, string? ErrorCode);
-internal sealed record PingMessage(string Kind, ulong MonotonicMs);
+internal sealed record PingMessage(string Kind, ulong MonotonicMs, int? RoundTripMs);
 internal sealed record PongMessage(string Kind, ulong MonotonicMs);
 internal sealed record StopMessage(string Kind, string Reason);

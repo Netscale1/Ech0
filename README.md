@@ -114,6 +114,7 @@ directly to the public Internet.
 - Demand-driven capture instead of an always-open Windows microphone
 - Authenticated, encrypted transport and trusted reconnect after pairing
 - Local jitter buffering and a voice-oriented 48 kHz audio path
+- Copyable, privacy-redacted diagnostics with versions, audio state, metrics, and RTT
 - Optional compatibility fallback to an existing `BlackHole 2ch` installation
 
 ## Requirements

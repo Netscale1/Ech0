@@ -143,6 +143,7 @@ final class ReceiverServer: @unchecked Sendable {
     var authenticateTrustedSender: ((ClientHello) -> Bool)?
     var trustSenderFromPairing: ((ClientHello) -> Bool)?
     var onCaptureStatus: ((CaptureStatus) -> Void)?
+    var onRoundTripTime: ((Int) -> Void)?
 
     private let queue = DispatchQueue(label: "io.github.netscale1.ech0.receiver")
     private let queueKey = DispatchSpecificKey<Void>()
@@ -602,6 +603,9 @@ final class ReceiverServer: @unchecked Sendable {
                 return
             }
             context.lastPingAt = ProcessInfo.processInfo.systemUptime
+            if let roundTripMs = ping.roundTripMs {
+                onRoundTripTime?(max(0, roundTripMs))
+            }
             sendControl(.pong(PongMessage(monotonicMs: ping.monotonicMs)), on: connection)
 
         case .stop(let stop):

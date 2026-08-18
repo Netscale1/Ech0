@@ -157,7 +157,11 @@ After authentication, the v2 runtime semantics remain unchanged:
 
 - `captureDemand { active, generation }` is sent by the Mac immediately after authentication;
 - `captureStatus { generation, state, errorCode }` reports `idle`, `starting`, `capturing`, `paused`, or `error`;
-- `ping { monotonicMs }` is sent once per second and echoed as `pong`;
+- `ping { monotonicMs, roundTripMs? }` is sent once per second and echoed as
+  `pong`; after the first reply, Windows includes its most recent measured RTT
+  for receiver diagnostics. The optional field is a backward-compatible v3
+  diagnostic extension; it does not introduce a new packet kind or protocol
+  version;
 - `stop { reason }` is terminal and is processed before the connection closes.
 
 Audio is accepted only while the current capture demand is active. Revoking the trusted sender sends `stop(reason: "trustRevoked")` in the encrypted channel.

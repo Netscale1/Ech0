@@ -15,6 +15,15 @@ internal enum AgentState
     Paused,
 }
 
+internal static class RoundTripTime
+{
+    public static int Measure(ulong sentAtMs, ulong receivedAtMs)
+    {
+        var elapsedMs = receivedAtMs >= sentAtMs ? receivedAtMs - sentAtMs : 0;
+        return (int)Math.Min(elapsedMs, (ulong)int.MaxValue);
+    }
+}
+
 internal sealed class ConnectionWorker : IAsyncDisposable
 {
     private readonly Ech0Settings settings;
@@ -27,6 +36,7 @@ internal sealed class ConnectionWorker : IAsyncDisposable
     private volatile bool demandActive;
     private ulong demandGeneration;
     private long lastPongTimestamp;
+    private int lastRoundTripMs = -1;
     private ulong sequence;
     private Task? runTask;
     private int lastLoggedAudioSession;
@@ -126,6 +136,7 @@ internal sealed class ConnectionWorker : IAsyncDisposable
             cancellationToken);
         stream = authenticated.Stream;
         lastPongTimestamp = Stopwatch.GetTimestamp();
+        Volatile.Write(ref lastRoundTripMs, -1);
 
         var hello = authenticated.Hello;
         if (settings.TryCompleteTrust(hello))
@@ -171,6 +182,11 @@ internal sealed class ConnectionWorker : IAsyncDisposable
                     await ApplyDemandAsync(cancellationToken);
                     break;
                 case "pong":
+                    var pong = Ech0Protocol.DecodeControl<PongMessage>(packet.Payload);
+                    var receivedAtMs = AudioCaptureService.MonotonicMilliseconds();
+                    Volatile.Write(
+                        ref lastRoundTripMs,
+                        RoundTripTime.Measure(pong.MonotonicMs, receivedAtMs));
                     lastPongTimestamp = Stopwatch.GetTimestamp();
                     break;
                 case "stop":
@@ -188,8 +204,12 @@ internal sealed class ConnectionWorker : IAsyncDisposable
     {
         while (!cancellationToken.IsCancellationRequested)
         {
+            var roundTripMs = Volatile.Read(ref lastRoundTripMs);
             await WriteControlAsync(
-                new PingMessage("ping", AudioCaptureService.MonotonicMilliseconds()),
+                new PingMessage(
+                    "ping",
+                    AudioCaptureService.MonotonicMilliseconds(),
+                    roundTripMs >= 0 ? roundTripMs : null),
                 cancellationToken);
             await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
             var elapsed = Stopwatch.GetElapsedTime(lastPongTimestamp);
