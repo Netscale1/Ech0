@@ -30,11 +30,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 The original notice remains at
 `macos/Driver/Ech0VirtualMic/LICENSE-APPLE-SAMPLE.txt`.
 
-## NAudio 2.2.1
+## NAudio 3.0.1
 
-The Windows application uses NAudio 2.2.1.
+The Windows application uses NAudio 3.0.1.
 
-Copyright 2020 Mark Heath
+Copyright © Mark Heath 2026
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in
