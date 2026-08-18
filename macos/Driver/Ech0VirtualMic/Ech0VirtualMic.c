@@ -76,29 +76,21 @@ A minimal user-space driver.
 #pragma mark Ech0VirtualMic State
 //==================================================================================================
 
-//	The purpose of the Ech0VirtualMic sample is to provide a bare bones implementations to
-//	illustrate the minimal set of things a driver has to do. The sample driver has the following
-//	qualities:
+//	This driver retains the object/property scaffolding from Apple's minimal AudioServerPlugIn
+//	sample, including inactive output/control cases. Ech0 publishes only the following objects:
 //	- a plug-in
-//		- custom property with the selector kPlugIn_CustomPropertyID = 'PCst'
+//		- custom PCM write property with the selector kPlugIn_CustomPropertyID = 'e0wr'
 //	- a box
 //	- a device
-//		- supports 44100 and 48000 sample rates
+//		- uses a 48000 Hz sample rate
 //		- provides a rate scalar of 1.0 via hard coding
 //	- a single input stream
 //		- supports 2 channels of 32 bit float LPCM samples
-//		- always produces zeros
-//	- a single output stream
-//		- supports 2 channels of 32 bit float LPCM samples
-//		- data written to it is ignored
+//		- reads mono Int16 PCM supplied by Ech0 and duplicates it to stereo
 //	- controls
 //		- master input volume
-//		- master output volume
 //		- master input mute
-//		- master output mute
 //		- master input data source
-//		- master output data source
-//		- master play-through data destination
 //		- all are for illustration purposes only and do not actually manipulate data
 
 

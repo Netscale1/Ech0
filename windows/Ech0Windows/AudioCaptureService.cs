@@ -1,7 +1,5 @@
 using System.Diagnostics;
 using System.Threading.Channels;
-using NAudio.CoreAudioApi;
-using NAudio.Wave;
 
 namespace Ech0.Windows;
 
@@ -16,9 +14,20 @@ internal sealed class AudioCaptureService : IDisposable
         });
     private readonly PcmFrameAccumulator accumulator = new();
     private readonly object captureSync = new();
-    private WasapiCapture? capture;
+    private readonly IAudioRecorderFactory recorderFactory;
+    private IAudioRecorder? capture;
     private long startTimestamp;
     private bool loggedFirstDataAvailable;
+
+    public AudioCaptureService()
+        : this(new WasapiAudioRecorderFactory())
+    {
+    }
+
+    internal AudioCaptureService(IAudioRecorderFactory recorderFactory)
+    {
+        this.recorderFactory = recorderFactory;
+    }
 
     public event Action<UnexpectedCaptureStop>? StoppedUnexpectedly;
     public ChannelReader<CapturedPcmFrame> Frames => frames.Reader;
@@ -47,19 +56,19 @@ internal sealed class AudioCaptureService : IDisposable
             }
         }
 
-        using var enumerator = new MMDeviceEnumerator();
-        using var device = string.IsNullOrWhiteSpace(inputDeviceId)
-            ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console)
-            : enumerator.GetDevice(inputDeviceId);
-        var nextCapture = new WasapiCapture(device, true, 20)
-        {
-            WaveFormat = new WaveFormat(48_000, 16, 1),
-        };
+        var nextCapture = recorderFactory.Create(inputDeviceId);
         nextCapture.DataAvailable += OnDataAvailable;
         nextCapture.RecordingStopped += OnRecordingStopped;
         lock (captureSync)
         {
-            DeviceName = device.FriendlyName;
+            if (capture is not null)
+            {
+                nextCapture.DataAvailable -= OnDataAvailable;
+                nextCapture.RecordingStopped -= OnRecordingStopped;
+                nextCapture.Dispose();
+                return;
+            }
+            DeviceName = nextCapture.DeviceName;
             accumulator.Clear();
             startTimestamp = Stopwatch.GetTimestamp();
             loggedFirstDataAvailable = false;
@@ -73,14 +82,17 @@ internal sealed class AudioCaptureService : IDisposable
         }
         catch
         {
-            ReleaseCapture(nextCapture, out _, out _);
+            if (DetachCapture(nextCapture, out _, out _))
+            {
+                nextCapture.Dispose();
+            }
             throw;
         }
     }
 
     public void Stop()
     {
-        WasapiCapture? current;
+        IAudioRecorder? current;
         lock (captureSync)
         {
             current = capture;
@@ -104,7 +116,7 @@ internal sealed class AudioCaptureService : IDisposable
         }
     }
 
-    private void OnDataAvailable(object? sender, WaveInEventArgs args)
+    private void OnDataAvailable(IAudioRecorder sender, ReadOnlySpan<byte> buffer)
     {
         int sessionId;
         ulong generation;
@@ -123,7 +135,7 @@ internal sealed class AudioCaptureService : IDisposable
                 loggedFirstDataAvailable = true;
                 firstDataElapsedMs = (long)Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
             }
-            completeFrames = accumulator.Append(args.Buffer.AsSpan(0, args.BytesRecorded));
+            completeFrames = accumulator.Append(buffer);
         }
         if (firstDataElapsedMs is long elapsedMs)
         {
@@ -135,22 +147,36 @@ internal sealed class AudioCaptureService : IDisposable
         }
     }
 
-    private void OnRecordingStopped(object? sender, StoppedEventArgs args)
+    private void OnRecordingStopped(IAudioRecorder stoppedCapture, Exception? exception)
     {
-        if (sender is not WasapiCapture stoppedCapture
-            || !ReleaseCapture(stoppedCapture, out var sessionId, out var generation))
+        if (!DetachCapture(stoppedCapture, out var sessionId, out var generation))
         {
             return;
         }
-        var errorCode = args.Exception?.GetType().Name ?? "captureStopped";
+        ThreadPool.QueueUserWorkItem(
+            static recorder => DisposeStoppedRecorder((IAudioRecorder)recorder!),
+            stoppedCapture);
+        var errorCode = exception?.GetType().Name ?? "captureStopped";
         Log.Write(
             "audio_capture_stopped",
             errorCode);
         StoppedUnexpectedly?.Invoke(new UnexpectedCaptureStop(sessionId, generation, errorCode));
     }
 
-    private bool ReleaseCapture(
-        WasapiCapture stoppedCapture,
+    private static void DisposeStoppedRecorder(IAudioRecorder recorder)
+    {
+        try
+        {
+            recorder.Dispose();
+        }
+        catch (Exception exception)
+        {
+            Log.Write("audio_capture_dispose_failed", exception.GetType().Name);
+        }
+    }
+
+    private bool DetachCapture(
+        IAudioRecorder stoppedCapture,
         out int sessionId,
         out ulong generation)
     {
@@ -170,7 +196,6 @@ internal sealed class AudioCaptureService : IDisposable
         }
         stoppedCapture.DataAvailable -= OnDataAvailable;
         stoppedCapture.RecordingStopped -= OnRecordingStopped;
-        stoppedCapture.Dispose();
         return true;
     }
 
