@@ -233,7 +233,8 @@ struct ContentView: View {
                 ReceiverDiagnosticsMetrics(
                     metrics: model.metrics,
                     consumerCount: model.inputConsumers.count,
-                    remoteCaptureState: model.remoteCaptureState
+                    remoteCaptureState: model.remoteCaptureState,
+                    roundTripMs: model.roundTripMs
                 )
 
                 VStack(alignment: .leading, spacing: 10) {
@@ -270,10 +271,9 @@ struct ContentView: View {
                     model.setCaptureDeviceAsSystemInput()
                 }
                 Spacer()
-                Button("Copy log") {
-                    copyToPasteboard(model.logs.joined(separator: "\n"))
+                Button("Copy diagnostics") {
+                    copyToPasteboard(model.diagnosticsReport)
                 }
-                .disabled(model.logs.isEmpty)
             }
             .padding(.horizontal, 32)
             .padding(.vertical, 12)
@@ -431,6 +431,7 @@ private struct ReceiverDiagnosticsMetrics: View {
     @ObservedObject var metrics: ReceiverMetricsModel
     let consumerCount: Int
     let remoteCaptureState: String
+    let roundTripMs: Int?
 
     var body: some View {
         HStack(alignment: .top, spacing: 34) {
@@ -447,6 +448,7 @@ private struct ReceiverDiagnosticsMetrics: View {
                 ("Last sequence", metrics.value.lastSequence.map(String.init) ?? "—"),
                 ("Input consumers", "\(consumerCount)"),
                 ("Windows capture", remoteCaptureState),
+                ("RTT", roundTripMs.map { "\($0) ms" } ?? "—"),
             ])
         }
     }

@@ -71,6 +71,7 @@ final class ReceiverViewModel: ObservableObject {
     @Published private(set) var connectedSenderId: String?
     @Published private(set) var inputConsumers: [String] = []
     @Published private(set) var remoteCaptureState = "idle"
+    @Published private(set) var roundTripMs: Int?
     @Published private(set) var manualCaptureActive = false
     @Published private(set) var captureDeviceName = "Audio input"
     @Published var automaticCapturePaused = false {
@@ -95,6 +96,7 @@ final class ReceiverViewModel: ObservableObject {
         formatter.dateFormat = "HH:mm:ss.SSS"
         return formatter
     }()
+    private static let virtualMicBundlePath = "/Library/Audio/Plug-Ins/HAL/Ech0VirtualMic.driver"
 
     init() {
         let initialPairingCode = PairingCode.generate()
@@ -147,6 +149,7 @@ final class ReceiverViewModel: ObservableObject {
         audioEngine.stop()
         metrics.update(ReceiverMetrics())
         clientName = nil
+        roundTripMs = nil
 
         if let receiverIdentityError {
             connectionLabel = "Setup required"
@@ -343,6 +346,12 @@ final class ReceiverViewModel: ObservableObject {
                 }
             }
         }
+
+        server.onRoundTripTime = { [weak self] roundTripMs in
+            DispatchQueue.main.async {
+                self?.roundTripMs = roundTripMs
+            }
+        }
     }
 
     private func bindInputDemandMonitor() {
@@ -424,11 +433,13 @@ final class ReceiverViewModel: ObservableObject {
             audioEngine.stop()
             audioFrameMetrics.reset()
             metrics.update(ReceiverMetrics())
+            roundTripMs = nil
 
         case .listening:
             connectionLabel = "Waiting for sender"
             clientName = nil
             connectedSenderId = nil
+            roundTripMs = nil
             do {
                 if audioEngine.outputDevice == nil {
                     try audioEngine.prepare()
@@ -444,6 +455,7 @@ final class ReceiverViewModel: ObservableObject {
             connectionLabel = "Validating sender"
             clientName = nil
             connectedSenderId = nil
+            roundTripMs = nil
 
         case .connected(let deviceName, let senderId):
             connectionLabel = remoteCaptureState == "capturing" ? "Streaming" : "Connected"
@@ -503,6 +515,43 @@ final class ReceiverViewModel: ObservableObject {
         logs.insert(stampedLine, at: 0)
         if logs.count > 10 {
             logs = Array(logs.prefix(10))
+        }
+    }
+
+    var diagnosticsReport: String {
+        let sensitiveValues = [host, clientName, connectedSenderId, pairingCode]
+            .compactMap { $0 }
+            + trustedDevices.map(\.deviceName)
+        return ReceiverDiagnosticsSnapshot(
+            appVersion: Self.versionDescription(for: Bundle.main),
+            driverVersion: Bundle(path: Self.virtualMicBundlePath)
+                .map { Self.versionDescription(for: $0) } ?? "not installed",
+            protocolVersion: SecureHandshake.protocolVersion,
+            connection: connectionLabel,
+            audioInput: captureDeviceName,
+            detection: automaticDetectionAvailable ? "system monitoring" : "manual fallback",
+            captureDemandActive: isCaptureDemandActive,
+            windowsCapture: remoteCaptureState,
+            roundTripMs: roundTripMs,
+            inputConsumers: inputConsumers,
+            metrics: metrics.value,
+            recentEvents: ReceiverDiagnosticsRedactor.redact(
+                logs,
+                sensitiveValues: sensitiveValues
+            )
+        ).text
+    }
+
+    private static func versionDescription(for bundle: Bundle) -> String {
+        let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        switch (version, build) {
+        case let (.some(version), .some(build)):
+            return "\(version) (\(build))"
+        case let (.some(version), .none):
+            return version
+        default:
+            return "unknown"
         }
     }
 }

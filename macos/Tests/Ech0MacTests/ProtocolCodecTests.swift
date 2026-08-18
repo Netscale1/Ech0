@@ -86,6 +86,25 @@ final class ProtocolCodecTests: XCTestCase {
         XCTAssertEqual(demand.generation, 4)
     }
 
+    func testPingRoundTripIncludesReportedRTT() throws {
+        let encoded = try ControlMessageCodec.encode(
+            .ping(PingMessage(monotonicMs: 99, roundTripMs: 7))
+        )
+        guard case .ping(let ping) = try ControlMessageCodec.decode(encoded) else {
+            return XCTFail("Expected ping")
+        }
+        XCTAssertEqual(ping.monotonicMs, 99)
+        XCTAssertEqual(ping.roundTripMs, 7)
+    }
+
+    func testLegacyPingWithoutRTTStillDecodes() throws {
+        let encoded = #"{"kind":"ping","monotonicMs":99}"#.data(using: .utf8)!
+        guard case .ping(let ping) = try ControlMessageCodec.decode(encoded) else {
+            return XCTFail("Expected ping")
+        }
+        XCTAssertNil(ping.roundTripMs)
+    }
+
     func testRejectsUnexpectedAudioFrameSize() {
         XCTAssertThrowsError(try PacketCodec.decodeAudioFrame(Data(repeating: 0, count: 22)))
     }

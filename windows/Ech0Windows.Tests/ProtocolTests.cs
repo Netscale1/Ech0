@@ -39,6 +39,28 @@ public sealed class ProtocolTests
     }
 
     [Fact]
+    public void PingEncodesLatestRoundTripTime()
+    {
+        var packet = Ech0Protocol.EncodeControl(new PingMessage("ping", 99, 7));
+        var ping = Ech0Protocol.DecodeControl<PingMessage>(packet.AsSpan(5));
+
+        Assert.Equal((ulong)99, ping.MonotonicMs);
+        Assert.Equal(7, ping.RoundTripMs);
+    }
+
+    [Theory]
+    [InlineData(100UL, 107UL, 7)]
+    [InlineData(107UL, 100UL, 0)]
+    [InlineData(0UL, 2147483648UL, int.MaxValue)]
+    public void RoundTripMeasurementIsMonotonicAndBounded(
+        ulong sentAtMs,
+        ulong receivedAtMs,
+        int expected)
+    {
+        Assert.Equal(expected, RoundTripTime.Measure(sentAtMs, receivedAtMs));
+    }
+
+    [Fact]
     public void ServerHelloDecodesTrustedReceiverIdentity()
     {
         var json = """{"kind":"serverHello","accepted":true,"reason":null,"targetBufferMs":60,"negotiatedProtocolVersion":3,"capabilities":["remoteCaptureControl","secureTransportV3"],"receiverId":"receiver-1","receiverName":"Mac mini","receiverKeyHash":"key-hash","authentication":"trusted","trustEstablished":true}"""u8;
