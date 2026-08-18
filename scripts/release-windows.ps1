@@ -95,11 +95,17 @@ if ($AllowUnsignedDevelopment) {
         -Force
 }
 
-$artifacts = @($executable, $installZip)
+$artifacts = @($installZip)
 if (Test-Path -LiteralPath $updateZip) { $artifacts += $updateZip }
-$artifacts | ForEach-Object {
+$checksumLines = $artifacts | ForEach-Object {
     $hash = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $([IO.Path]::GetFileName($_))"
-} | Set-Content -LiteralPath (Join-Path $outputDirectory "SHA256SUMS")
+}
+$checksumText = ($checksumLines -join "`n") + "`n"
+[IO.File]::WriteAllText(
+    (Join-Path $outputDirectory "SHA256SUMS"),
+    $checksumText,
+    [Text.UTF8Encoding]::new($false)
+)
 
 Write-Output $installZip
