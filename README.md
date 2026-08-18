@@ -1,79 +1,212 @@
-# Ech0
+<p align="center">
+  <img src="branding/v2/macos/Ech0AppIcon1024.png" width="128" alt="Ech0 app icon">
+</p>
 
-Ech0 is an open-source local-network microphone bridge. A Windows PC captures
-live voice audio and streams it to a macOS receiver. The recommended endpoint is
-the bundled, input-only `Ech0 Virtual Microphone`; an existing `BlackHole 2ch`
-installation can be used as an optional compatibility fallback.
+<h1 align="center">Ech0</h1>
 
-## Workspace Layout
+<p align="center">
+  Use the microphone connected to your Windows PC as a native audio input on a remote Mac.
+</p>
 
-- `macos/`: macOS receiver app built with SwiftUI, `Network.framework`, Core Audio, and a local jitter buffer.
-- `windows/`: Windows x64 tray agent built with .NET 10, WinForms, NAudio, and WASAPI shared mode.
-- `docs/protocol.md`: transport and control message specification shared by the Windows and macOS apps.
-- `docs/setup.md`: installation and manual setup notes for both macOS audio routes.
-- `docs/windows-codex-setup.md`: complete Windows-to-Mac microphone setup, permissions, pairing, updates, and verification.
-- `docs/macos-audio-bridge.md`: input-only virtual microphone architecture, Parsec isolation, performance findings, and the operator checklist.
-- `docs/macos-release.md`: self-contained macOS build, validation, signing, packaging, rollback, and notarization guide.
-- `docs/release.md`: test-first build gates, CI, signed Windows releases, and updater integrity.
-- `docs/review-findings.md`: historical engineering findings and verification evidence; not a current requirements document.
+<p align="center">
+  <a href="https://github.com/Netscale1/Ech0/actions/workflows/ci.yml"><img src="https://github.com/Netscale1/Ech0/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/Netscale1/Ech0/releases/latest"><img src="https://img.shields.io/github/v/release/Netscale1/Ech0" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Netscale1/Ech0" alt="Apache-2.0 license"></a>
+</p>
 
-## Scope
+Ech0 is an open-source, local-network microphone bridge for a specific remote
+desktop problem: the Mac is the computer running the voice application, while
+the microphone and headphones are physically connected to the Windows PC from
+which the Mac is being controlled.
 
-- One Windows sender at a time
-- Authenticated and encrypted transport on the local LAN
-- Pairing via Mac host and a copyable 128-bit security code
-- Trusted reconnect after first pairing
-- Remote microphone activation only while the Mac requests capture
-- Voice-call optimized PCM audio path
-- Apple Silicon Mac with macOS 13 or later
-- Bundled `Ech0 Virtual Microphone`, or optional `BlackHole 2ch` fallback
+It consists of a lightweight Windows tray agent, a native macOS receiver, and
+an input-only macOS virtual microphone. When a Mac application opens that
+microphone, Ech0 starts capture on Windows, transports the audio over an
+authenticated and encrypted LAN connection, and exposes it to macOS like a
+regular input device.
 
-## Build Notes
+## Why Ech0 exists
 
-Both build entry points run their platform tests before producing artifacts. The
-Windows project can be cross-published as an unsigned `win-x64` executable with
-.NET 10. This project does not currently have paid Apple Developer Program or
-Windows Authenticode credentials, so community binaries are explicitly marked
-unnotarized/unsigned. See the release guides before downloading or publishing a
-binary.
+Our setup uses Parsec to control a Mac from a Windows PC. Parsec already handles
+the desktop, controls, and Mac playback very well. The missing path was the
+other direction:
 
-Use:
+```text
+microphone connected to Windows -> application running on the Mac
+```
 
-- Xcode 16+ or a Swift 6 toolchain on macOS for `macos/`
-- .NET 10 SDK for building `windows/`; the published executable does not require .NET on the target PC
+At the time of this release, Parsec's
+[microphone passthrough documentation](https://support.parsec.app/hc/en-us/articles/32380350695956-Use-your-Microphone-with-Parsec)
+supports sending a Windows or macOS client microphone to a **Windows host**.
+Its current [host feature matrix](https://support.parsec.app/hc/en-us/articles/32381463419924-Feature-Matrix)
+lists microphone support for Windows hosts, but not macOS hosts. Ech0 fills that
+particular gap; it does not replace Parsec or attempt to be another remote
+desktop application.
 
-Run the complete credential-free macOS developer/CI gate with:
+The goal sounds simple, but the audio topology matters. It is not enough to
+make the Windows microphone audible somewhere on the Mac. The signal must
+arrive as a microphone input for the target application without also entering
+the Mac playback path that Parsec sends back to Windows.
+
+## Why not just use BlackHole?
+
+[BlackHole](https://github.com/ExistentialAudio/BlackHole) is an excellent
+open-source macOS loopback driver. It routes audio between applications on the
+same Mac, but it does not capture a microphone on another computer or transport
+that audio over the network. A sender and receiver are still required.
+
+Early Ech0 versions wrote the received microphone audio into `BlackHole 2ch`.
+That works as a general-purpose compatibility route, but in our Parsec setup
+the same loopback/output topology could also be part of host-audio capture. The
+microphone could therefore return to the Windows side together with Mac
+playback—the exact feedback path we wanted to avoid.
+
+This is not a defect in BlackHole or Parsec. It is a consequence of asking one
+loopback device to participate in two different routes. Ech0 now ships its own
+`Ech0 Virtual Microphone`, designed with input channels and **no output
+channels**. macOS applications can record from it, while playback and Parsec's
+audio route remain independent.
+
+BlackHole remains an optional fallback for systems where the dedicated driver
+cannot be installed. Ech0 no longer requires it and only changes its sample
+rate when it is actually selected as the fallback.
+
+## How it works
+
+```text
+macOS application opens Ech0 Virtual Microphone
+                    |
+                    v
+        Ech0Mac detects input demand
+                    |
+          encrypted control message
+                    |
+                    v
+  Ech0Windows opens the selected WASAPI microphone
+                    |
+          encrypted 48 kHz PCM over TCP
+                    |
+                    v
+       Ech0Mac -> Ech0 Virtual Microphone
+                    |
+                    v
+          requesting macOS application
+```
+
+The Windows agent stays connected while idle, but it does not keep the physical
+microphone open continuously. Capture starts only when a Mac process actively
+uses the selected Ech0 input, and stops when that demand ends. A manual capture
+control is available for diagnostics.
+
+The first pairing uses a copyable security code. Later connections authenticate
+the saved sender and receiver identities. Protocol v3 uses ephemeral P-256 key
+agreement, HKDF-SHA256, and directional AES-256-GCM protection for credentials,
+control traffic, and audio. Ech0 is still intended for a trusted local network;
+it does not provide an Internet relay and port `48484/TCP` should not be exposed
+directly to the public Internet.
+
+## What Ech0 provides
+
+- Native Windows x64 tray agent using .NET 10, NAudio, and WASAPI shared mode
+- Native Apple Silicon macOS receiver using SwiftUI, Network.framework, and Core Audio
+- Dedicated input-only `Ech0 Virtual Microphone`
+- Automatic DNS-SD discovery, with manual host configuration as a fallback
+- Demand-driven capture instead of an always-open Windows microphone
+- Authenticated, encrypted transport and trusted reconnect after pairing
+- Local jitter buffering and a voice-oriented 48 kHz audio path
+- Optional compatibility fallback to an existing `BlackHole 2ch` installation
+
+## Requirements
+
+- Windows 10 22H2 or Windows 11, x64
+- Apple Silicon Mac running macOS 13 or later
+- Both computers on the same trusted local network
+- Administrator approval when installing the macOS virtual microphone driver
+
+Version 0.2.0 community binaries are not backed by commercial signing
+credentials. The macOS package is ad-hoc signed but not Apple-notarized; the
+Windows executable is not Authenticode-signed and may trigger SmartScreen. The
+source, tests, checksums, and credential-free release scripts are public so the
+artifacts can be inspected and reproduced.
+
+## Quick start
+
+1. Download both platform archives from the
+   [latest GitHub release](https://github.com/Netscale1/Ech0/releases/latest).
+2. On the Mac, verify the published checksum, extract the community archive,
+   and read its `INSTALL.md` before installing `Ech0Mac.app` and
+   `Ech0VirtualMic.driver`.
+3. On Windows, verify `SHA256SUMS`, extract `Ech0Windows-win-x64.zip`, and run
+   `Ech0Windows.exe`. The self-contained executable does not require a separate
+   .NET installation or administrator rights.
+4. Start Ech0Mac. Let the Windows agent discover it automatically, or enter the
+   Mac hostname or IP address and port `48484` manually.
+5. Copy the pairing code displayed by Ech0Mac into the Windows pairing window.
+6. Set `Ech0 Virtual Microphone` as the input in the target Mac application, or
+   use Ech0Mac to make it the system input.
+
+Once paired, the Windows agent can launch at sign-in and reconnect while idle.
+Opening the virtual microphone on the Mac activates Windows capture
+automatically.
+
+For complete installation, permissions, fallback, and verification steps, see
+[Setup notes](docs/setup.md) and the
+[Windows-to-Mac guide](docs/windows-codex-setup.md).
+
+## Scope and non-goals
+
+Ech0 is deliberately a focused utility rather than a general audio workstation.
+Version 0.2.0 supports:
+
+- one Windows sender and one macOS receiver at a time;
+- one selected Windows capture endpoint;
+- local-network transport without a cloud service;
+- live microphone delivery, not recording or file transfer;
+- an input-only Mac endpoint, not system-audio or speaker streaming.
+
+## Build and verify
+
+The macOS gate runs the Swift tests, Release build, signature and bundle checks,
+and an input-only HAL smoke test without installing the driver or changing the
+computer's audio routes:
 
 ```sh
 ./scripts/macos-release.sh check
 ```
 
-Community packaging, optional local signing, Developer ID packaging, and
-notarization are separate fail-closed commands documented in
-`docs/macos-release.md`.
+The Windows gate requires the .NET 10 SDK and runs the test suite before
+producing an unsigned self-contained x64 package:
 
-## First Run
+```powershell
+./scripts/release-windows.ps1 -AllowUnsignedDevelopment
+```
 
-1. Build the app and bundled virtual microphone with `./scripts/macos-release.sh check`.
-2. Install `Ech0 Virtual Microphone` as described in `docs/setup.md`. If the
-   dedicated driver is unavailable, Ech0 can instead use an existing
-   `BlackHole 2ch` device.
-3. Build `windows/Ech0Windows/Ech0Windows.csproj` or run `scripts/build-windows.sh`.
-4. Copy the generated `Ech0Windows.exe` to the Windows PC and open it.
-5. Let DNS-SD find Ech0Mac, or enter the Mac host manually.
-6. Copy the security code shown by Ech0Mac into the Windows pairing window.
-7. Keep “Start Ech0 with Windows” enabled if the agent should reconnect automatically.
+See [macOS release engineering](docs/macos-release.md),
+[Windows release engineering](docs/release.md), and the
+[protocol specification](docs/protocol.md) for the complete reproducible paths.
 
-The Windows agent stays connected while idle. It opens the selected Windows
-input in WASAPI shared mode only when a Mac application actively uses the input
-device selected by Ech0Mac. Ech0 prefers `Ech0 Virtual Microphone`, then falls
-back to `BlackHole 2ch` when installed. Protocol v3 encrypts credentials,
-control traffic, and audio and pins the Mac identity after first pairing.
-Existing plaintext v2 associations intentionally require one new pairing after
-upgrade.
+## Repository guide
+
+- `macos/`: SwiftUI receiver, Core Audio integration, tests, and virtual microphone driver
+- `windows/`: WinForms tray agent, WASAPI capture, secure transport, and tests
+- `scripts/`: test-first build, validation, signing, and packaging entry points
+- `docs/macos-audio-bridge.md`: architecture, Parsec isolation, and measured performance work
+- `docs/protocol.md`: transport, pairing, control, and audio-frame specification
+- `docs/review-findings.md`: historical engineering evidence, not current requirements
+
+## Contributing and security
+
+Focused contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+before changing the protocol, audio topology, pairing, or release formats.
+Report suspected vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md), not in a public issue.
+
+Ech0 is an independent project and is not affiliated with Parsec or the
+BlackHole project.
 
 ## License
 
 Ech0 is licensed under the [Apache License 2.0](LICENSE). The Ech0 name and logo
 are not granted for use as branding for modified distributions. Third-party
-components retain their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+components retain their own licenses; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
