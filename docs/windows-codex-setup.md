@@ -1,144 +1,202 @@
-# Ech0: setup microfono Windows → Mac
+# Ech0 Windows-to-Mac setup
 
-Questa guida configura il percorso:
+This guide configures the following path:
 
-`microfono Windows → Ech0Windows → LAN fidata → Ech0Mac → Ech0 Virtual Microphone → app Mac`
+`Windows microphone -> Ech0Windows -> trusted LAN -> Ech0Mac -> Ech0 Virtual Microphone -> macOS application`
 
-Ech0Windows resta connesso ma apre il microfono Windows soltanto quando Core Audio segnala che un processo Mac sta realmente acquisendo dal dispositivo d’ingresso preparato da Ech0Mac. Il rilevamento è di sistema e non contiene logica specifica per Codex.
+Ech0Windows stays connected while idle, but opens the Windows microphone only
+when Core Audio reports that a macOS process is actively capturing from the
+input endpoint selected by Ech0Mac. This is system-level detection and does not
+contain application-specific logic.
 
-## Requisiti
+## Requirements
 
-- Mac con macOS 13 o successivo.
-- PC x64 con Windows 10 22H2 o Windows 11.
-- Mac e PC sulla stessa LAN privata e fidata.
-- `Ech0 Virtual Microphone` installato sul Mac oppure, come fallback opzionale,
+- An Apple Silicon Mac running macOS 13 or later.
+- An x64 PC running Windows 10 22H2 or Windows 11.
+- Both computers on the same private, trusted LAN.
+- `Ech0 Virtual Microphone` installed on the Mac or, as an optional fallback,
   `BlackHole 2ch`.
-- L’app Mac desiderata configurata per usare il dispositivo mostrato da Ech0Mac
-  come ingresso.
-- .NET 10 SDK soltanto sulla macchina che esegue la build Windows; il PC di destinazione non richiede .NET.
+- The target macOS application configured to use the input endpoint shown by
+  Ech0Mac.
+- The .NET 10 SDK only on the machine that builds Ech0Windows. The destination
+  PC does not need a separate .NET installation because release builds are
+  self-contained.
 
-Il protocollo v3 autentica il Mac, cifra pairing, controlli e audio con AES-GCM e salva su Windows il pin della chiave del ricevitore. Non esporre comunque la porta `48484/TCP` direttamente su Internet: il trasporto è progettato e verificato per la LAN locale.
+Protocol v3 authenticates the Mac and protects pairing credentials, control
+messages, and audio with directional AES-256-GCM keys. Windows also pins the
+Mac receiver signing key after pairing. Do not expose `48484/TCP` directly to
+the Internet: Ech0 is designed and tested for a trusted local network.
 
-## 1. Preparare il Mac
+## 1. Prepare the Mac
 
-Installare il driver `Ech0 Virtual Microphone` incluso nel pacchetto macOS. Se
-non si può usare il driver dedicato, è possibile installare
-[BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) come fallback.
-Ech0 preferisce automaticamente il driver dedicato e richiede che almeno uno
-dei due dispositivi sia disponibile.
+Install the `Ech0 Virtual Microphone` driver included in the macOS package. If
+the dedicated driver cannot be used, you may install
+[BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) as a fallback.
+Ech0 automatically prefers its dedicated input-only driver and requires at
+least one of these two endpoints.
 
-Dalla root del repository:
+To build and validate both the app and the driver from source, run this from the
+repository root:
 
 ```sh
-swift test --package-path macos
-./scripts/build-macos-app.sh
-open dist/macos/Ech0Mac.app
+./scripts/macos-release.sh check
 ```
 
-Lo script crea il bundle in `dist/macos/Ech0Mac.app`. Se nel portachiavi esiste un’identità `Apple Development`, viene usata automaticamente. È possibile sceglierne una esplicitamente con `ECH0_CODESIGN_IDENTITY`.
+This produces ad-hoc-signed development artifacts in `dist/macos` and does
+not install or load them. Follow the
+[macOS release and installation guide](macos-release.md) for local installation,
+community packaging, signing, and rollback instructions.
 
-Al primo avvio:
+At first launch:
 
-1. Aprire **Pairing** e copiare il codice di sicurezza Base32 per il nuovo dispositivo e l’indirizzo del Mac.
-2. Abilitare **Launch at login** se Ech0Mac deve partire con macOS.
-3. Nell’app Mac desiderata selezionare il dispositivo mostrato da Ech0Mac come
-   ingresso e concedere a quell’app il permesso **Microfono**.
+1. Open **Pairing**, then copy the Base32 security code for a new device and the
+   Mac host address shown by Ech0Mac.
+2. Enable **Launch at login** if Ech0Mac should start with macOS.
+3. In the target macOS application, select the endpoint shown by Ech0Mac as its
+   input and grant that application **Microphone** permission.
 
-Ech0Mac non richiede Accessibilità e non registra né salva l’audio.
+Ech0Mac does not require Accessibility permission and does not persist audio.
 
-## 2. Preparare Windows
+## 2. Prepare Windows
 
-Per una build community self-contained x64:
+For a self-contained x64 community build:
 
 ```sh
 ./scripts/build-windows.sh
 ```
 
-Lo script esegue prima tutti i test C# e produce:
+The script runs the complete C# test suite before publishing and produces:
 
-- `dist/windows/Ech0Windows-win-x64.zip`: prima installazione non firmata;
-- `dist/windows/SHA256SUMS`: hash SHA-256.
+- `dist/windows/Ech0Windows-win-x64.zip`: unsigned first-install package;
+- `dist/windows/SHA256SUMS`: SHA-256 hashes for the published artifacts.
 
-Lo ZIP non firmato può essere pubblicato come **community build — unsigned** e
-può generare un avviso SmartScreen. Non include aggiornamenti automatici: le
-nuove versioni vanno scaricate e sostituite manualmente. Un eventuale
-`Ech0Windows-update.zip` automatico deve invece essere prodotto su Windows con
-`scripts/release-windows.ps1`, un certificato Authenticode e un timestamp server
-configurati. I dettagli sono in `docs/release.md`.
+The unsigned ZIP may be published only as a **community build — unsigned** and
+may trigger a SmartScreen warning. It has no automatic updater: download and
+replace the executable manually for each new version.
 
-Sul PC Windows:
+A signed `Ech0Windows-update.zip` must instead be produced on Windows with
+`scripts/release-windows.ps1`, a trusted Authenticode certificate, and a
+configured timestamp server. See [the release gates](release.md) for details.
 
-1. Estrarre `Ech0Windows-win-x64.zip` in una cartella locale.
-2. Avviare `Ech0Windows.exe` dalla sessione interattiva dell’utente.
-3. Lasciare attiva la discovery automatica, oppure inserire manualmente IP del Mac e porta `48484`.
-4. Inserire il codice mostrato da Ech0Mac.
-5. Abilitare **Start Ech0 with Windows**.
+On the Windows PC:
 
-La prima configurazione copia l’eseguibile in `%LOCALAPPDATA%\Ech0` e registra l’avvio per l’utente corrente in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Non servono UAC, driver o privilegi amministrativi.
+1. Extract `Ech0Windows-win-x64.zip` to a local directory.
+2. Start `Ech0Windows.exe` from the interactive user session.
+3. Keep automatic discovery enabled, or enter the Mac host address and port
+   `48484` manually.
+4. Choose a specific Windows microphone if Ech0 must never follow changes to
+   the Windows default input. Otherwise leave **Windows default input**
+   selected.
+5. Enter the security code shown by Ech0Mac.
+6. Enable **Start Ech0 with Windows** if wanted.
 
-Se è disponibile una release firmata, usare soltanto lo ZIP prodotto da quel
-percorso, estrarlo e avviare `Update-Ech0.cmd`. L’updater verifica SHA-256,
-firma e publisher atteso; arresta soltanto il processo eseguito dal percorso
-installato in `%LOCALAPPDATA%\Ech0`, sostituisce il file e lo riavvia. Per le
-community build non firmate, sostituire manualmente l'eseguibile dopo averne
-verificato l'hash pubblicato.
+When launch at login is enabled, Ech0 copies the executable to
+`%LOCALAPPDATA%\Ech0` and registers it for the current user under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Ech0Windows installs
+no driver and does not require UAC or administrator privileges.
 
-## 3. Discovery e pairing
+For a signed release, extract only the update ZIP produced by the signed release
+pipeline and run `Update-Ech0.cmd`. The updater verifies the SHA-256 hash,
+Authenticode signature, and expected publisher. It stops only the process
+running from `%LOCALAPPDATA%\Ech0`, replaces that executable, and restarts it.
+For an unsigned community build, verify the published hash and replace the
+executable manually.
 
-Ech0Mac pubblica il servizio DNS-SD `_ech0._tcp.local`. Ech0Windows prova prima la discovery nativa Windows e permette sempre un fallback manuale con:
+## 3. Discovery and pairing
 
-- indirizzo IP del Mac;
-- porta `48484`;
-- codice di sicurezza Base32 mostrato dal Mac.
+Ech0Mac publishes the DNS-SD service `_ech0._tcp.local`. Ech0Windows first
+tries native Windows discovery and always allows manual configuration with:
 
-Dopo il pairing, Windows conserva il `receiverId`, il pin SHA-256 della chiave di firma del Mac, un `senderId` e un segreto casuale. Segreto e codice eventualmente pendente vengono serializzati soltanto nei rispettivi campi protetti con DPAPI `CurrentUser`; sul Mac viene conservato soltanto l’hash del segreto Windows e la chiave privata del ricevitore ha permessi owner-only. Il codice viene eliminato da Windows dopo la conferma. Una sessione trusted accetta soltanto lo stesso receiver ID e lo stesso pin; una vecchia associazione v2 priva di pin richiede intenzionalmente un nuovo pairing una tantum.
+- the Mac host address or hostname;
+- port `48484`;
+- the Base32 security code shown by Ech0Mac.
 
-Nelle impostazioni Windows, un Mac associato appare come `Connected · Trusted` oppure `Trusted · not reachable`; il campo del codice compare soltanto quando serve un nuovo pairing. **Change Mac** conserva l’associazione precedente finché il nuovo Mac non conferma la fiducia. **Reset pairing** elimina invece subito l’associazione locale.
+After pairing, Windows stores the `receiverId`, the SHA-256 pin of the Mac
+signing key, a `senderId`, and a random secret. The secret and any pending
+pairing code are stored only in fields protected with DPAPI `CurrentUser`.
+The Mac stores only the hash of the Windows secret, and its receiver private key
+is owner-only. Windows deletes the one-time code after trust is confirmed.
 
-Se il Mac dimentica un dispositivo Windows associato, la sessione viene chiusa
-immediatamente. Windows ferma il microfono e i retry, mostra `Pairing required`
-nella tray e una notifica. Aprire le impostazioni e inserire il codice corrente
-del Mac per autorizzare nuove credenziali.
+A trusted session accepts only the saved receiver ID and signing-key pin. A
+legacy v2 association without a pin intentionally requires one new pairing.
 
-Windows invia un heartbeat ogni secondo. Se un crash, una sospensione o un cambio rete lascia una socket incompleta, Ech0Mac libera automaticamente lo slot sender dopo 5 secondi e consente la riconnessione successiva.
+In Windows settings, a paired Mac appears as `Connected · Trusted` or
+`Trusted · not reachable`. The code field appears only when pairing is
+required. **Change Mac** preserves the existing association until the new Mac
+confirms trust. **Reset pairing** immediately removes the local association.
 
-## 4. Attivazione automatica
+If the Mac forgets a paired Windows device, it closes that session immediately.
+Windows stops capture and reconnect attempts, shows `Pairing required` in the
+tray, and displays a notification. Open settings and enter the Mac's current
+code to establish new credentials.
 
-Ech0Mac osserva i Process Objects pubblici di Core Audio. La richiesta diventa
-attiva quando almeno un processo dichiara contemporaneamente I/O d’ingresso in
-esecuzione e l’uso del device ID scelto da Ech0Mac. La priorità è:
+Windows sends a heartbeat every second. If a crash, sleep transition, or network
+change leaves an incomplete socket, Ech0Mac releases the sender slot after five
+seconds so the next connection can proceed.
 
-1. `Ech0 Virtual Microphone`, il percorso input-only raccomandato;
-2. `BlackHole 2ch`, fallback opzionale se il driver dedicato non è disponibile.
+## 4. Automatic activation
 
-Se viene scelto BlackHole, Ech0 lo configura a 48 kHz perché questo è il formato
-audio del protocollo. La configurazione non viene applicata quando è attivo il
-driver dedicato.
+Ech0Mac monitors public Core Audio process objects. Demand becomes active when
+at least one process simultaneously reports running input I/O and the device ID
+selected by Ech0Mac. Endpoint priority is:
 
-Quando la richiesta diventa attiva, Ech0Mac invia `captureDemand`. Ech0Windows apre l’ingresso predefinito Windows in WASAPI shared mode e normalizza l’audio in PCM16 mono, 48 kHz, frame da 20 ms. Quando l’ultimo consumer chiude l’ingresso, l’agent chiude WASAPI dopo il breve debounce e il Mac svuota il buffer.
+1. `Ech0 Virtual Microphone`, the recommended input-only route;
+2. `BlackHole 2ch`, an optional fallback when the dedicated driver is absent.
 
-Il segnale rappresenta I/O audio reale, non l’intento privato dell’interfaccia dell’app. Per esempio, un registratore che apre il microfono per mostrare l’anteprima è già un consumer prima che venga premuto “Registra”. Il pulsante manuale compare soltanto se il monitor Core Audio non è disponibile.
+If BlackHole is selected, Ech0 configures it to 48 kHz because that is the
+protocol sample rate. Ech0 does not change BlackHole when the dedicated driver
+is active.
 
-## 5. Verifica finale
+When demand becomes active, Ech0Mac sends `captureDemand`. Ech0Windows opens
+the microphone selected in its settings through WASAPI shared, event-driven
+capture. If **Windows default input** is selected, it resolves the current
+default console capture endpoint when capture starts. Audio is transported as
+PCM16 mono at 48 kHz in 20 ms frames.
 
-Con Ech0Mac connesso a Windows:
+If the selected endpoint is unavailable, Ech0 reports that it is waiting and
+retries every two seconds while demand remains active. An explicitly selected
+device ID is preserved across retries; the default-input option may follow a
+new Windows default device.
 
-1. Senza consumer, Ech0Mac deve mostrare `Automatic` e Windows deve essere inattivo.
-2. Aprire il microfono in QuickTime Player, Codex o un’altra app: Ech0Mac deve mostrare `Streaming` e il contatore dei frame deve crescere.
-3. Parlare e verificare il meter di Ech0Mac e la ricezione nell’app.
-4. Chiudere l’acquisizione: entro pochi secondi Ech0Mac deve tornare inattivo, con buffer a `0 ms`.
-5. Aprire contemporaneamente una seconda app sullo stesso ingresso: la cattura deve restare attiva finché non chiude l’ultimo consumer.
-6. Selezionare un ingresso Mac diverso da quello mostrato da Ech0: non deve partire alcuna cattura.
-7. Spegnere le cuffie wireless Windows: Ech0Windows deve attendere il ritorno dell’endpoint, senza passare silenziosamente a un altro microfono.
+When the last macOS consumer closes the input, Ech0Mac applies a short debounce,
+Ech0Windows closes WASAPI, and the Mac clears its audio buffer.
 
-Controlli locali:
+The signal represents real audio I/O, not a private application UI state. For
+example, a recorder that opens the microphone for a level preview is already a
+consumer before the user presses Record. A manual capture control is available
+only when Core Audio process monitoring is unavailable.
+
+## 5. End-to-end verification
+
+With Ech0Mac connected to Windows:
+
+1. With no consumer, Ech0Mac should show `Automatic` and Windows capture
+   should remain closed.
+2. Open the Ech0 input in QuickTime Player, Codex, or another macOS application.
+   Ech0Mac should show `Streaming`, and the received-frame counter should
+   increase.
+3. Speak and verify both the Ech0Mac level meter and reception in the target
+   application.
+4. Close capture. Within a few seconds Ech0Mac should return to idle with a
+   `0 ms` buffer.
+5. Open the same Ech0 input in two applications. Capture should stay active
+   until the last consumer closes it.
+6. Select a different macOS input in the target application. Ech0 should not
+   start Windows capture.
+7. Select a specific wireless Windows microphone in Ech0Windows, start capture,
+   and disconnect that device. Ech0Windows should wait and retry the same
+   endpoint instead of silently selecting another microphone. This invariant
+   does not apply when **Windows default input** is selected.
+
+Repository checks:
 
 ```sh
-swift test --package-path macos
+./scripts/macos-release.sh check
 ./scripts/build-windows.sh
 ```
 
-I test C# vanno eseguiti su Windows con il runtime/SDK appropriato:
+For the authoritative Windows runtime check, run the C# suite on Windows with
+the supported SDK:
 
 ```powershell
 dotnet test windows/Ech0Windows.Tests/Ech0Windows.Tests.csproj -c Release
@@ -146,30 +204,44 @@ dotnet test windows/Ech0Windows.Tests/Ech0Windows.Tests.csproj -c Release
 
 ## Troubleshooting
 
-### Ech0 rileva un consumer ma Windows non cattura
+### Ech0 detects a consumer but Windows does not capture
 
-Controllare che Windows esegua l’ultima build. Usare `Ech0Windows-update.zip` e avviare `Update-Ech0.cmd`, poi verificare che l’agent torni nella tray e si riconnetta.
+Confirm that Windows is running the current build and that the selected
+microphone is connected. The tray reports a waiting state while Ech0 retries an
+unavailable endpoint. For a signed release use `Ech0Windows-update.zip` and
+`Update-Ech0.cmd`; for an unsigned community build, verify the published hash
+and replace the executable manually.
 
-### Si sente la propria voce nelle cuffie
+### You hear your own voice in the headphones
 
-Questo ritorno è normalmente prodotto dall’audio di Parsec, non dal monitor Core Audio. Disabilitare l’audio di ritorno del host Parsec e lasciare Ech0 responsabile soltanto del percorso microfono.
+This return path is normally produced by the Parsec audio route, not by Core
+Audio demand monitoring. Disable host-audio return in Parsec and leave Ech0
+responsible only for the microphone path.
 
-### Codex non riceve audio
+### The macOS application does not receive audio
 
-Verificare che Codex usi il dispositivo mostrato da Ech0Mac, normalmente `Ech0 Virtual Microphone`, e che l’app abbia il permesso Microfono. Ech0Mac deve mostrare frame ricevuti e il meter deve muoversi quando si parla.
+Confirm that the application uses the endpoint shown by Ech0Mac, normally
+`Ech0 Virtual Microphone`, and has Microphone permission. Ech0Mac should show
+received frames and a moving level meter while you speak.
 
-### Nessuna discovery Windows
+### Windows discovery finds no Mac
 
-Verificare che Mac e PC siano sulla stessa LAN, consentire Ech0Windows nel firewall privato Windows e usare l’inserimento manuale dell’IP del Mac e della porta `48484`.
+Confirm that both computers are on the same LAN, allow Ech0Windows through the
+Windows private-network firewall, or enter the Mac host address and port `48484`
+manually.
 
-### Il codice Windows è diverso da quello del Mac
+### Windows asks for a code after the device was already trusted
 
-Dopo il primo pairing Windows non deve mostrare alcun codice: il codice del Mac serve soltanto ai nuovi dispositivi. Se Windows mostra `Pairing required`, usare il codice corrente visibile sul Mac. Non copiare o sincronizzare manualmente codici per un dispositivo che appare già `Trusted`.
+After successful pairing, Windows should not retain or display the one-time
+code. If it shows `Pairing required`, enter the current code visible on the
+Mac. Do not manually copy or synchronize codes for a device that already
+appears as `Trusted`.
 
-## Limiti intenzionali
+## Intentional limitations
 
-- Un solo sender attivo alla volta.
-- Nessun relay Internet o fallback cloud.
-- Nessuna registrazione locale dell’audio.
-- Nessuna modifica al microfono predefinito, volume, mute o modalità esclusiva Windows.
-- La porta TCP resta destinata alla LAN locale e non a un’esposizione Internet diretta.
+- One active sender at a time.
+- No Internet relay or cloud fallback.
+- No local audio recording.
+- No changes to the Windows default microphone, volume, mute state, or exclusive
+  mode.
+- The TCP port is for the trusted local network, not direct Internet exposure.
