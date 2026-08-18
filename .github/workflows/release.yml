@@ -20,7 +20,8 @@ jobs:
         run: |
           ./scripts/macos-release.sh check
           ./scripts/macos-release.sh package-community
-          shasum -a 256 dist/macos/Ech0Mac-*-community.zip > dist/macos/Ech0Mac-community.zip.sha256
+          cd dist/macos
+          shasum -a 256 Ech0Mac-*-community.zip > Ech0Mac-community.zip.sha256
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
