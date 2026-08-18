@@ -11,15 +11,21 @@ Ech0Windows resta connesso ma apre il microfono Windows soltanto quando Core Aud
 - Mac con macOS 13 o successivo.
 - PC x64 con Windows 10 22H2 o Windows 11.
 - Mac e PC sulla stessa LAN privata e fidata.
-- `BlackHole 2ch` installato sul Mac.
-- L’app Mac desiderata configurata per usare `Ech0 Virtual Microphone` come ingresso.
+- `Ech0 Virtual Microphone` installato sul Mac oppure, come fallback opzionale,
+  `BlackHole 2ch`.
+- L’app Mac desiderata configurata per usare il dispositivo mostrato da Ech0Mac
+  come ingresso.
 - .NET 10 SDK soltanto sulla macchina che esegue la build Windows; il PC di destinazione non richiede .NET.
 
 Il protocollo v3 autentica il Mac, cifra pairing, controlli e audio con AES-GCM e salva su Windows il pin della chiave del ricevitore. Non esporre comunque la porta `48484/TCP` direttamente su Internet: il trasporto è progettato e verificato per la LAN locale.
 
 ## 1. Preparare il Mac
 
-Installare [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole), poi verificare in **Configurazione MIDI Audio** che il device sia presente.
+Installare il driver `Ech0 Virtual Microphone` incluso nel pacchetto macOS. Se
+non si può usare il driver dedicato, è possibile installare
+[BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) come fallback.
+Ech0 preferisce automaticamente il driver dedicato e richiede che almeno uno
+dei due dispositivi sia disponibile.
 
 Dalla root del repository:
 
@@ -35,13 +41,14 @@ Al primo avvio:
 
 1. Aprire **Pairing** e copiare il codice di sicurezza Base32 per il nuovo dispositivo e l’indirizzo del Mac.
 2. Abilitare **Launch at login** se Ech0Mac deve partire con macOS.
-3. Nell’app Mac desiderata selezionare `Ech0 Virtual Microphone` come ingresso e concedere a quell’app il permesso **Microfono**.
+3. Nell’app Mac desiderata selezionare il dispositivo mostrato da Ech0Mac come
+   ingresso e concedere a quell’app il permesso **Microfono**.
 
 Ech0Mac non richiede Accessibilità e non registra né salva l’audio.
 
 ## 2. Preparare Windows
 
-Per una build self-contained x64 di sviluppo:
+Per una build community self-contained x64:
 
 ```sh
 ./scripts/build-windows.sh
@@ -49,10 +56,15 @@ Per una build self-contained x64 di sviluppo:
 
 Lo script esegue prima tutti i test C# e produce:
 
-- `dist/windows/Ech0Windows-win-x64.zip`: prima installazione non firmata per test;
+- `dist/windows/Ech0Windows-win-x64.zip`: prima installazione non firmata;
 - `dist/windows/SHA256SUMS`: hash SHA-256.
 
-Una release distribuibile e il relativo `Ech0Windows-update.zip` devono essere creati su Windows con `scripts/release-windows.ps1`, un certificato Authenticode e un timestamp server configurati. Il gate esegue test, firma e verifica sia l’eseguibile sia lo script di update. I dettagli sono in `docs/release.md`.
+Lo ZIP non firmato può essere pubblicato come **community build — unsigned** e
+può generare un avviso SmartScreen. Non include aggiornamenti automatici: le
+nuove versioni vanno scaricate e sostituite manualmente. Un eventuale
+`Ech0Windows-update.zip` automatico deve invece essere prodotto su Windows con
+`scripts/release-windows.ps1`, un certificato Authenticode e un timestamp server
+configurati. I dettagli sono in `docs/release.md`.
 
 Sul PC Windows:
 
@@ -64,7 +76,12 @@ Sul PC Windows:
 
 La prima configurazione copia l’eseguibile in `%LOCALAPPDATA%\Ech0` e registra l’avvio per l’utente corrente in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Non servono UAC, driver o privilegi amministrativi.
 
-Per aggiornare un’installazione esistente, usare soltanto lo ZIP prodotto dal percorso firmato, estrarlo e avviare `Update-Ech0.cmd`. L’updater verifica SHA-256, firma e publisher atteso; arresta soltanto il processo eseguito dal percorso installato in `%LOCALAPPDATA%\Ech0`, sostituisce il file e lo riavvia.
+Se è disponibile una release firmata, usare soltanto lo ZIP prodotto da quel
+percorso, estrarlo e avviare `Update-Ech0.cmd`. L’updater verifica SHA-256,
+firma e publisher atteso; arresta soltanto il processo eseguito dal percorso
+installato in `%LOCALAPPDATA%\Ech0`, sostituisce il file e lo riavvia. Per le
+community build non firmate, sostituire manualmente l'eseguibile dopo averne
+verificato l'hash pubblicato.
 
 ## 3. Discovery e pairing
 
@@ -78,13 +95,25 @@ Dopo il pairing, Windows conserva il `receiverId`, il pin SHA-256 della chiave d
 
 Nelle impostazioni Windows, un Mac associato appare come `Connected · Trusted` oppure `Trusted · not reachable`; il campo del codice compare soltanto quando serve un nuovo pairing. **Change Mac** conserva l’associazione precedente finché il nuovo Mac non conferma la fiducia. **Reset pairing** elimina invece subito l’associazione locale.
 
-Se il Mac dimentica SE7EN, la sessione viene chiusa immediatamente. Windows ferma il microfono e i retry, mostra `Pairing required` nella tray e una notifica. Aprire le impostazioni e inserire il codice corrente del Mac per autorizzare nuove credenziali.
+Se il Mac dimentica un dispositivo Windows associato, la sessione viene chiusa
+immediatamente. Windows ferma il microfono e i retry, mostra `Pairing required`
+nella tray e una notifica. Aprire le impostazioni e inserire il codice corrente
+del Mac per autorizzare nuove credenziali.
 
 Windows invia un heartbeat ogni secondo. Se un crash, una sospensione o un cambio rete lascia una socket incompleta, Ech0Mac libera automaticamente lo slot sender dopo 5 secondi e consente la riconnessione successiva.
 
 ## 4. Attivazione automatica
 
-Ech0Mac osserva i Process Objects pubblici di Core Audio. La richiesta diventa attiva quando almeno un processo dichiara contemporaneamente I/O d’ingresso in esecuzione e l’uso del device ID preparato da Ech0Mac. Normalmente il device è `Ech0 Virtual Microphone`; `BlackHole 2ch` resta il fallback di compatibilità.
+Ech0Mac osserva i Process Objects pubblici di Core Audio. La richiesta diventa
+attiva quando almeno un processo dichiara contemporaneamente I/O d’ingresso in
+esecuzione e l’uso del device ID scelto da Ech0Mac. La priorità è:
+
+1. `Ech0 Virtual Microphone`, il percorso input-only raccomandato;
+2. `BlackHole 2ch`, fallback opzionale se il driver dedicato non è disponibile.
+
+Se viene scelto BlackHole, Ech0 lo configura a 48 kHz perché questo è il formato
+audio del protocollo. La configurazione non viene applicata quando è attivo il
+driver dedicato.
 
 Quando la richiesta diventa attiva, Ech0Mac invia `captureDemand`. Ech0Windows apre l’ingresso predefinito Windows in WASAPI shared mode e normalizza l’audio in PCM16 mono, 48 kHz, frame da 20 ms. Quando l’ultimo consumer chiude l’ingresso, l’agent chiude WASAPI dopo il breve debounce e il Mac svuota il buffer.
 

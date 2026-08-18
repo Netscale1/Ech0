@@ -7,7 +7,7 @@ Release artifacts must be produced only after the repository tests pass. CI and 
 `.github/workflows/ci.yml` runs on every push and pull request with read-only repository permissions:
 
 - macOS 15 runs the strict-concurrency Swift suite, builds the Release app bundle, verifies its code signature, and lints `Info.plist`;
-- Windows installs .NET 10, runs the complete C# suite, publishes the self-contained x64 application, and verifies the unsigned development artifact hash path.
+- Windows installs .NET 10, runs the complete C# suite, publishes the self-contained x64 application, and verifies the unsigned community artifact hash path.
 
 Third-party actions are pinned to immutable commit SHAs. CI deliberately does not receive a release signing certificate.
 
@@ -17,8 +17,8 @@ Third-party actions are pinned to immutable commit SHAs. CI deliberately does no
 ./scripts/macos-release.sh check
 ```
 
-The credential-free gate runs the strict Swift suite, builds an ad-hoc app,
-builds and smoke-tests the unsigned input-only HAL driver, and validates both
+The credential-free gate runs the strict Swift suite, builds ad-hoc app and
+driver bundles, smoke-tests the input-only HAL driver, and validates both
 bundle structures. CI uses the same command and does not inspect the worker
 keychain.
 
@@ -27,7 +27,7 @@ packaging, and notarization are deliberately separate fail-closed steps. See
 [macOS developer and release pipeline](macos-release.md) for prerequisites,
 commands, environment variables, validation, and rollback.
 
-## Windows development build
+## Windows community build
 
 From macOS or another environment with .NET 10:
 
@@ -35,7 +35,12 @@ From macOS or another environment with .NET 10:
 ./scripts/build-windows.sh
 ```
 
-This runs all C# tests before publish and creates an unsigned first-install artifact. It does not create an update ZIP, because an unsigned self-updater would provide a misleading integrity boundary.
+This runs all C# tests before publish and creates an unsigned first-install
+artifact plus SHA-256 hashes. It may be attached to a release only when clearly
+labelled **community build — unsigned**. Windows SmartScreen may warn because no
+publisher certificate is present. It does not create an update ZIP: users must
+download and replace the executable manually, because an unsigned self-updater
+would provide a misleading integrity boundary.
 
 ## Signed Windows release
 
@@ -57,7 +62,9 @@ The script:
 6. verifies the update artifact through the updater's read-only `-VerifyOnly` path;
 7. creates the install and update ZIPs plus `SHA256SUMS`.
 
-The repository does not contain a signing private key or certificate. Until those external release credentials are provisioned, only development artifacts can be built and no production update ZIP should be distributed.
+The repository does not contain a signing private key or certificate. Until
+those external release credentials are provisioned, only unsigned community
+artifacts can be built and no automatic update ZIP should be distributed.
 
 ## Updater security boundary
 

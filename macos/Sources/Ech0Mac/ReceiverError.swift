@@ -3,6 +3,7 @@ import Foundation
 enum ReceiverError: LocalizedError {
     case audioComponentUnavailable
     case audioDeviceNotFound(String)
+    case audioEndpointUnavailable(fallbackName: String)
     case connectionClosed
     case coreAudio(OSStatus)
     case invalidAudioPayload
@@ -19,6 +20,8 @@ enum ReceiverError: LocalizedError {
             return "Core Audio output component unavailable."
         case .audioDeviceNotFound(let name):
             return "\(name) was not found on this Mac."
+        case .audioEndpointUnavailable(let fallbackName):
+            return "Install Ech0 Virtual Microphone or the optional \(fallbackName) fallback."
         case .connectionClosed:
             return "The TCP connection closed."
         case .coreAudio(let status):

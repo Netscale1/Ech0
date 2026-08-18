@@ -27,9 +27,19 @@ $updateZip = Join-Path $outputDirectory "Ech0Windows-update.zip"
 $hashFile = Join-Path $outputDirectory "Ech0Windows.exe.sha256"
 $updateScript = Join-Path $outputDirectory "Update-Ech0.ps1"
 $updateLauncher = Join-Path $outputDirectory "Update-Ech0.cmd"
+$licenseFile = Join-Path $outputDirectory "LICENSE"
+$noticeFile = Join-Path $outputDirectory "NOTICE"
+$thirdPartyNoticesFile = Join-Path $outputDirectory "THIRD_PARTY_NOTICES.md"
+
+Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $licenseFile
+Copy-Item -LiteralPath (Join-Path $repoRoot "NOTICE") -Destination $noticeFile
+Copy-Item -LiteralPath (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md") -Destination $thirdPartyNoticesFile
 
 if ($AllowUnsignedDevelopment) {
-    Compress-Archive -LiteralPath $executable -DestinationPath $installZip -Force
+    Compress-Archive `
+        -LiteralPath $executable, $licenseFile, $noticeFile, $thirdPartyNoticesFile `
+        -DestinationPath $installZip `
+        -Force
     (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant() |
         Set-Content -LiteralPath $hashFile -NoNewline
     & (Join-Path $repoRoot "windows\Update-Ech0.ps1") `
@@ -37,8 +47,8 @@ if ($AllowUnsignedDevelopment) {
         -ExpectedHashFile $hashFile `
         -VerifyOnly `
         -AllowUnsignedDevelopment
-    if ($LASTEXITCODE -ne 0) { throw "Unsigned development artifact verification failed." }
-    Write-Warning "Unsigned development build: no update package was created."
+    if ($LASTEXITCODE -ne 0) { throw "Unsigned community artifact verification failed." }
+    Write-Warning "Unsigned community build: no automatic update package was created."
 } else {
     $thumbprint = $env:ECH0_WINDOWS_CERT_THUMBPRINT
     $timestampUrl = $env:ECH0_TIMESTAMP_URL
@@ -75,7 +85,10 @@ if ($AllowUnsignedDevelopment) {
     & $updateScript -SourceExecutable $executable -ExpectedHashFile $hashFile -VerifyOnly
     if ($LASTEXITCODE -ne 0) { throw "Signed update artifact verification failed." }
 
-    Compress-Archive -LiteralPath $executable -DestinationPath $installZip -Force
+    Compress-Archive `
+        -LiteralPath $executable, $licenseFile, $noticeFile, $thirdPartyNoticesFile `
+        -DestinationPath $installZip `
+        -Force
     Compress-Archive `
         -LiteralPath $executable, $hashFile, $updateScript, $updateLauncher `
         -DestinationPath $updateZip `

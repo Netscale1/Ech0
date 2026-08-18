@@ -15,7 +15,7 @@ driver_binary="$driver_bundle/Contents/MacOS/Ech0VirtualMic"
 release_version="$(
   plutil -extract CFBundleShortVersionString raw "$repo_root/macos/Info.plist"
 )"
-development_archive="$dist_dir/Ech0Mac-$release_version-development.zip"
+community_archive="$dist_dir/Ech0Mac-$release_version-community.zip"
 official_package="$dist_dir/Ech0Mac-$release_version.pkg"
 cleanup_stage=""
 cleanup_temporary_artifact=""
@@ -44,11 +44,11 @@ usage()
 Usage: ./scripts/macos-release.sh <command>
 
 Commands:
-  check             Run the strict Swift tests, build the app ad-hoc, build and
-                    smoke-test the unsigned HAL driver, and validate structure.
+  check             Run the strict Swift tests, build the app and HAL driver
+                    with ad-hoc signatures, smoke-test, and validate structure.
   sign-local        Sign the built app and driver with the identity in
                     ECH0_MACOS_SIGNING_IDENTITY, then verify both bundles.
-  package-dev       Create an explicitly non-release ZIP from checked artifacts.
+  package-community Create an explicitly unnotarized ZIP from checked artifacts.
   package-official  Require Developer ID Application and Installer identities,
                     sign both bundles, and create a signed installer package.
   notarize          Submit the signed installer with the externally provisioned
@@ -88,10 +88,12 @@ validate_structure()
   plutil -lint "$app_bundle/Contents/Info.plist" >/dev/null
   plutil -lint "$driver_bundle/Contents/Info.plist" >/dev/null
 
-  [[ "$(plutil -extract CFBundleIdentifier raw "$app_bundle/Contents/Info.plist")" == "net.ech0.mac" ]] ||
+  [[ "$(plutil -extract CFBundleIdentifier raw "$app_bundle/Contents/Info.plist")" == "io.github.netscale1.ech0" ]] ||
     fail "unexpected app bundle identifier"
-  [[ "$(plutil -extract CFBundleIdentifier raw "$driver_bundle/Contents/Info.plist")" == "net.ech0.virtual-mic" ]] ||
+  [[ "$(plutil -extract CFBundleIdentifier raw "$driver_bundle/Contents/Info.plist")" == "io.github.netscale1.ech0.virtual-mic" ]] ||
     fail "unexpected driver bundle identifier"
+  [[ "$(plutil -extract CFBundleShortVersionString raw "$driver_bundle/Contents/Info.plist")" == "$release_version" ]] ||
+    fail "app and driver release versions do not match"
 
   file "$app_binary" | grep -F "Mach-O 64-bit executable arm64" >/dev/null ||
     fail "app executable is not a 64-bit arm64 Mach-O"
@@ -100,6 +102,18 @@ validate_structure()
 
   codesign --verify --deep --strict "$app_bundle" ||
     fail "app signature validation failed"
+  codesign --verify --strict "$driver_bundle" ||
+    fail "driver signature validation failed"
+}
+
+require_adhoc_signatures()
+{
+  codesign -dv --verbose=4 "$app_bundle" 2>&1 |
+    grep -F "Signature=adhoc" >/dev/null ||
+    fail "community app must use an ad-hoc signature"
+  codesign -dv --verbose=4 "$driver_bundle" 2>&1 |
+    grep -F "Signature=adhoc" >/dev/null ||
+    fail "community driver must use an ad-hoc signature"
 }
 
 sign_bundles()
@@ -135,11 +149,13 @@ check_artifacts()
 
   ECH0_CODESIGN_IDENTITY=- "$repo_root/scripts/build-macos-app.sh"
   "$repo_root/scripts/build-macos-virtual-mic.sh"
+  codesign --force --options runtime --sign - "$driver_bundle"
   validate_structure
+  require_adhoc_signatures
 
   print "macOS check passed"
   shasum -a 256 "$app_binary" "$driver_binary"
-  print "The app is ad-hoc signed and the driver is unsigned; neither is an official release."
+  print "The app and driver are ad-hoc signed and are not notarized."
 }
 
 sign_local()
@@ -155,19 +171,31 @@ sign_local()
   print "Local signing and strict bundle validation passed."
 }
 
-package_development()
+package_community()
 {
   require_command ditto
   require_artifacts
   validate_structure
+  require_adhoc_signatures
 
-  cleanup_stage="$(mktemp -d /private/tmp/ech0-development-package.XXXXXX)"
-  cleanup_temporary_artifact="$(mktemp /private/tmp/ech0-development-package.XXXXXX)"
+  cleanup_stage="$(mktemp -d /private/tmp/ech0-community-package.XXXXXX)"
+  cleanup_temporary_artifact="$(mktemp /private/tmp/ech0-community-package.XXXXXX)"
 
-  mkdir -p "$cleanup_stage/Ech0Mac-$release_version-development"
-  ditto "$app_bundle" "$cleanup_stage/Ech0Mac-$release_version-development/Ech0Mac.app"
-  ditto "$driver_bundle" "$cleanup_stage/Ech0Mac-$release_version-development/Ech0VirtualMic.driver"
-  cp "$repo_root/docs/macos-release.md" "$cleanup_stage/Ech0Mac-$release_version-development/INSTALL.md"
+  local package_root="$cleanup_stage/Ech0Mac-$release_version-community"
+  mkdir -p "$package_root"
+  ditto "$app_bundle" "$package_root/Ech0Mac.app"
+  ditto "$driver_bundle" "$package_root/Ech0VirtualMic.driver"
+  cp "$repo_root/docs/macos-release.md" "$package_root/INSTALL.md"
+  cp "$repo_root/LICENSE" "$package_root/LICENSE"
+  cp "$repo_root/NOTICE" "$package_root/NOTICE"
+  cp "$repo_root/THIRD_PARTY_NOTICES.md" "$package_root/THIRD_PARTY_NOTICES.md"
+  (
+    cd "$package_root"
+    shasum -a 256 \
+      "Ech0Mac.app/Contents/MacOS/Ech0Mac" \
+      "Ech0VirtualMic.driver/Contents/MacOS/Ech0VirtualMic" \
+      > "SHA256SUMS"
+  )
 
   COPYFILE_DISABLE=1 ditto \
     -c \
@@ -177,14 +205,14 @@ package_development()
     --noqtn \
     --noacl \
     --keepParent \
-    "$cleanup_stage/Ech0Mac-$release_version-development" \
+    "$package_root" \
     "$cleanup_temporary_artifact"
-  mv -f "$cleanup_temporary_artifact" "$development_archive"
+  mv -f "$cleanup_temporary_artifact" "$community_archive"
   cleanup_temporary_artifact=""
 
-  print "$development_archive"
-  shasum -a 256 "$development_archive"
-  print "Development package created. It is not a notarized public release."
+  print "$community_archive"
+  shasum -a 256 "$community_archive"
+  print "Community package created. It is ad-hoc signed and not notarized."
 }
 
 package_official()
@@ -219,7 +247,7 @@ package_official()
 
   pkgbuild \
     --root "$cleanup_stage" \
-    --identifier net.ech0.macos \
+    --identifier io.github.netscale1.ech0.package \
     --version "$release_version" \
     --install-location / \
     --ownership recommended \
@@ -265,8 +293,8 @@ case "$command_name" in
   sign-local)
     sign_local
     ;;
-  package-dev)
-    package_development
+  package-community)
+    package_community
     ;;
   package-official)
     package_official

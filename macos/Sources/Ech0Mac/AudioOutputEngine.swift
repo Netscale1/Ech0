@@ -3,6 +3,9 @@ import CoreAudio
 import Foundation
 
 final class AudioOutputEngine: @unchecked Sendable {
+    static let fallbackDeviceName = "BlackHole 2ch"
+    static let sampleRate = 48_000.0
+
     private let jitterBuffer = JitterBuffer()
     private let lifecycleLock = NSLock()
     private var audioUnit: AudioUnit?
@@ -18,7 +21,7 @@ final class AudioOutputEngine: @unchecked Sendable {
         withLifecycleLock { running }
     }
 
-    func prepare(deviceNamed name: String = "BlackHole 2ch") throws {
+    func prepare(fallbackDeviceNamed name: String = fallbackDeviceName) throws {
         if let writer = VirtualMicrophoneWriter.connect() {
             withLifecycleLock {
                 stopUnlocked()
@@ -29,8 +32,9 @@ final class AudioOutputEngine: @unchecked Sendable {
         }
 
         guard let device = SystemAudio.deviceNamed(name) else {
-            throw ReceiverError.audioDeviceNotFound(name)
+            throw ReceiverError.audioEndpointUnavailable(fallbackName: name)
         }
+        try SystemAudio.setNominalSampleRate(named: name, sampleRate: Self.sampleRate)
         try withLifecycleLock {
             try configureAudioUnitUnlocked(for: device)
             storedOutputDevice = device

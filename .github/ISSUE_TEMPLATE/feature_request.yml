@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a focused improvement to Ech0
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should Ech0 solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful behavior, not an implementation plan.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Areas affected
+      options:
+        - label: Network protocol or pairing
+        - label: macOS audio routing or driver
+        - label: Windows capture or startup
+        - label: Packaging or installation

@@ -1,0 +1,50 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Ech0
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include pairing secrets, private keys, personal audio, or security vulnerabilities.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Affected component
+      options:
+        - macOS app
+        - Ech0 Virtual Microphone
+        - Windows agent
+        - Protocol or pairing
+        - Packaging or documentation
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Ech0 version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Relevant environment
+      description: OS versions, CPU architecture, and selected Ech0 audio endpoint. Remove personal machine details.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      render: shell

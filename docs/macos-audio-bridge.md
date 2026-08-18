@@ -26,8 +26,11 @@ duplicates the mono samples for the input stream.
 Ech0Mac discovers the device by its stable UID and writes PCM through the
 private Core Audio custom property `e0wr`. The payload is `CFData`, a property
 list type that the Core Audio host can marshal across its process boundary.
-`BlackHole 2ch` remains a compatibility fallback when the dedicated device is
-not available.
+`BlackHole 2ch` remains an optional compatibility fallback when the dedicated
+device is not available. It is not a startup prerequisite. If neither endpoint
+exists, Ech0 reports that audio setup is required instead of opening the server
+with no usable microphone route. The 48 kHz BlackHole configuration is applied
+only after BlackHole is selected as the fallback.
 
 ## System-wide activation
 

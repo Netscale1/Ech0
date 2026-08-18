@@ -17,7 +17,7 @@ final class AudioInputDemandMonitor: @unchecked Sendable {
         let devicesBlock: AudioObjectPropertyListenerBlock
     }
 
-    private let queue = DispatchQueue(label: "net.ech0.receiver.audio-demand")
+    private let queue = DispatchQueue(label: "io.github.netscale1.ech0.audio-demand")
     private let queueKey = DispatchSpecificKey<Void>()
     private let ignoredBundleIdentifiers: Set<String>
     private let stopDelay: TimeInterval
@@ -30,7 +30,7 @@ final class AudioInputDemandMonitor: @unchecked Sendable {
 
     init(
         stopDelay: TimeInterval = 2,
-        ignoredBundleIdentifiers: Set<String> = ["net.ech0.mac"]
+        ignoredBundleIdentifiers: Set<String> = ["io.github.netscale1.ech0"]
     ) {
         self.stopDelay = stopDelay
         self.ignoredBundleIdentifiers = ignoredBundleIdentifiers
@@ -38,7 +38,7 @@ final class AudioInputDemandMonitor: @unchecked Sendable {
     }
 
     @discardableResult
-    func start(deviceNamed name: String = "BlackHole 2ch") -> Bool {
+    func start(deviceNamed name: String) -> Bool {
         syncOnQueue {
             guard !isStarted else { return targetDeviceID != nil }
             guard let device = SystemAudio.deviceNamed(name) else {

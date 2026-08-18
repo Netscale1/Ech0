@@ -2,7 +2,7 @@ import CoreAudio
 import Foundation
 
 struct VirtualMicrophoneWriter: Sendable {
-    static let deviceUID = "net.ech0.virtual-mic.device"
+    static let deviceUID = "io.github.netscale1.ech0.virtual-mic.device"
     static let pcmWriteSelector = fourCC("e0wr")
 
     let device: AudioDeviceDescriptor

@@ -377,9 +377,7 @@ struct ContentView: View {
 
     private var connectionDetail: String {
         if let errorMessage = model.errorMessage { return errorMessage }
-        return model.isBlackHoleAvailable
-            ? "\(model.host):\(model.port) · \(model.captureDeviceName) ready"
-            : "\(model.blackHoleDeviceName) missing"
+        return "\(model.host):\(model.port) · \(model.captureDeviceName) ready"
     }
 
     private var connectionColor: Color {

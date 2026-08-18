@@ -7,7 +7,7 @@
     <key>CFBundleExecutable</key>
     <string>Ech0Mac</string>
 	<key>CFBundleIdentifier</key>
-	<string>net.ech0.mac</string>
+	<string>io.github.netscale1.ech0</string>
 	<key>CFBundleIconFile</key>
 	<string>Ech0</string>
     <key>CFBundleInfoDictionaryVersion</key>
