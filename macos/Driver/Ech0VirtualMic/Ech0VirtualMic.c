@@ -129,7 +129,7 @@ enum
 //	multiple devices were supported, this state would need to be encapsulated in one or more structs
 //	so that each object's state can be tracked individually.
 //	Note also that we share a single mutex across all objects to be thread safe for the same reason.
-#define										kPlugIn_BundleID				"net.ech0.virtual-mic"
+#define										kPlugIn_BundleID				"io.github.netscale1.ech0.virtual-mic"
 static pthread_mutex_t						gPlugIn_StateMutex				= PTHREAD_MUTEX_INITIALIZER;
 static UInt32								gPlugIn_RefCount				= 0;
 static AudioServerPlugInHostRef				gPlugIn_Host					= NULL;
@@ -139,8 +139,8 @@ static const AudioObjectPropertySelector	kPlugIn_CustomPropertyID		= 'e0wr';
 static CFStringRef							gBox_Name						= NULL;
 static Boolean								gBox_Acquired					= true;
 
-#define										kDevice_UID						"net.ech0.virtual-mic.device"
-#define										kDevice_ModelUID				"net.ech0.virtual-mic.model"
+#define										kDevice_UID						"io.github.netscale1.ech0.virtual-mic.device"
+#define										kDevice_ModelUID				"io.github.netscale1.ech0.virtual-mic.model"
 static pthread_mutex_t						gDevice_IOMutex					= PTHREAD_MUTEX_INITIALIZER;
 static Float64								gDevice_SampleRate				= 48000.0;
 static UInt64								gDevice_IOIsRunning				= 0;

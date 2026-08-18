@@ -64,7 +64,6 @@ final class ReceiverViewModel: ObservableObject {
     @Published var connectionLabel = "Starting"
     @Published var errorMessage: String?
     @Published var host = LocalHostResolver.primaryIPv4Address() ?? "127.0.0.1"
-    @Published var isBlackHoleAvailable = false
     @Published var logs: [String] = []
     let metrics = ReceiverMetricsModel()
     @Published var pairingCode: String
@@ -80,8 +79,6 @@ final class ReceiverViewModel: ObservableObject {
     @Published private(set) var automaticDetectionAvailable = false
     @Published private(set) var launchAtLoginEnabled = false
 
-    let blackHoleDeviceName = "BlackHole 2ch"
-    let targetSampleRate = 48_000.0
     let port: UInt16 = 48_484
 
     private let audioEngine = AudioOutputEngine()
@@ -123,7 +120,6 @@ final class ReceiverViewModel: ObservableObject {
         bindCallbacks()
         refreshHostAddress()
         refreshTrustedDevices()
-        refreshBlackHoleStatus()
         startMetricsTimer()
         bindInputDemandMonitor()
         restartReceiver()
@@ -141,16 +137,8 @@ final class ReceiverViewModel: ObservableObject {
         host = LocalHostResolver.primaryIPv4Address() ?? host
     }
 
-    func refreshBlackHoleStatus() {
-        isBlackHoleAvailable = SystemAudio.deviceNamed(blackHoleDeviceName) != nil
-        if !isBlackHoleAvailable {
-            errorMessage = "\(blackHoleDeviceName) is missing. Install it before starting the receiver."
-        }
-    }
-
     func restartReceiver() {
         refreshHostAddress()
-        refreshBlackHoleStatus()
 
         server.stop()
         inputDemandMonitor.stop()
@@ -167,15 +155,8 @@ final class ReceiverViewModel: ObservableObject {
             return
         }
 
-        guard isBlackHoleAvailable else {
-            connectionLabel = "Setup required"
-            appendLog("Blocked startup because \(blackHoleDeviceName) is not installed.")
-            return
-        }
-
         do {
-            try synchronizeBlackHoleDevice()
-            try audioEngine.prepare(deviceNamed: blackHoleDeviceName)
+            try audioEngine.prepare()
             restartInputDemandMonitor()
             try audioEngine.start()
             try server.start()
@@ -197,7 +178,6 @@ final class ReceiverViewModel: ObservableObject {
 
     func setCaptureDeviceAsSystemInput() {
         do {
-            try synchronizeBlackHoleDevice()
             try SystemAudio.setDefaultInputDevice(named: captureDeviceName)
             appendLog("Set \(captureDeviceName) as the default system input.")
             errorMessage = nil
@@ -451,7 +431,7 @@ final class ReceiverViewModel: ObservableObject {
             connectedSenderId = nil
             do {
                 if audioEngine.outputDevice == nil {
-                    try audioEngine.prepare(deviceNamed: blackHoleDeviceName)
+                    try audioEngine.prepare()
                     restartInputDemandMonitor()
                 }
                 try audioEngine.start()
@@ -505,12 +485,6 @@ final class ReceiverViewModel: ObservableObject {
 
     private func refreshTrustedDevices() {
         trustedDevices = trustedDeviceStore.allDevices()
-    }
-
-    private func synchronizeBlackHoleDevice() throws {
-        try SystemAudio.setNominalSampleRate(named: blackHoleDeviceName, sampleRate: targetSampleRate)
-        let activeRate = try SystemAudio.nominalSampleRate(named: blackHoleDeviceName)
-        appendLog("Configured \(blackHoleDeviceName) at \(Int(activeRate)) Hz.")
     }
 
     private static func normalizedAudioLevel(for samples: [Int16]) -> Double {

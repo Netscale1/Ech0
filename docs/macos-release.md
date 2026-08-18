@@ -7,8 +7,7 @@ or notarization credentials.
 
 The pipeline deliberately separates:
 
-- CI/development checks, which use an ad-hoc app signature and an unsigned
-  driver;
+- CI/community checks, which use ad-hoc app and driver signatures;
 - local testing signatures, supplied by the developer;
 - official Developer ID packaging;
 - notarization, which uses credentials provisioned outside the repository.
@@ -59,9 +58,9 @@ The supported commands are:
 
 | Command | Credentials | Result |
 | --- | --- | --- |
-| `check` | none | strict tests, ad-hoc app, unsigned driver, smoke and structure checks |
+| `check` | none | strict tests, ad-hoc app and driver, smoke and structure checks |
 | `sign-local` | local signing identity | locally signed app and driver |
-| `package-dev` | none beyond `check` | explicitly non-release ZIP |
+| `package-community` | none beyond `check` | unnotarized ZIP with hashes and notices |
 | `package-official` | Developer ID Application and Installer identities | signed installer package, not yet notarized |
 | `notarize` | external notary keychain profile | submitted, stapled, Gatekeeper-validated installer |
 
@@ -82,14 +81,14 @@ This command:
    contains a signing identity;
 2. runs the complete Swift suite with strict concurrency diagnostics;
 3. builds the Release app bundle into `dist/macos/Ech0Mac.app`;
-4. builds the HAL bundle into `dist/macos/Ech0VirtualMic.driver`;
+4. builds and ad-hoc signs the HAL bundle into `dist/macos/Ech0VirtualMic.driver`;
 5. compiles and runs the driver smoke executable;
 6. validates both property lists, identifiers, bundle structure, executable
    types, architecture, and the app's ad-hoc signature;
 7. prints SHA-256 diagnostics for the two binaries.
 
-The driver remains unsigned because loading a HAL driver is intentionally
-outside the CI boundary. The smoke test verifies its input-only topology, PCM
+The ad-hoc signature verifies bundle integrity but does not identify a trusted
+publisher. The smoke test verifies the driver's input-only topology, PCM
 handoff, conversion, and reset path without installing it.
 
 This is the command CI should run on a macOS worker. It requires no secrets and
@@ -128,23 +127,66 @@ codesign -dv --verbose=4 dist/macos/Ech0Mac.app
 codesign -dv --verbose=4 dist/macos/Ech0VirtualMic.driver
 ```
 
-## Development package
+## Community package without a paid Apple account
 
-After `check`, create a package for local handoff:
+The repository can be built and shared without Apple Developer Program
+membership. After `check`, create the community package:
 
 ```sh
-./scripts/macos-release.sh package-dev
+./scripts/macos-release.sh package-community
 ```
 
 The result is:
 
 ```text
-dist/macos/Ech0Mac-<version>-development.zip
+dist/macos/Ech0Mac-<version>-community.zip
 ```
 
-It contains the app, driver, and this guide. The archive is explicitly a
-development artifact. The app is ad-hoc signed unless `sign-local` was run, and
-the driver may be unsigned. Do not publish it as an official release.
+It contains the app, driver, hashes, licenses, notices, and this guide. Both
+bundles are ad-hoc signed. The archive may be published only with the explicit
+label **community build — not notarized**. macOS cannot verify its publisher;
+users may need to approve the app in Privacy & Security and install the driver
+manually with administrator authorization.
+
+This is the free alternative, not an equivalent replacement for Developer ID.
+Do not describe the archive as Apple-notarized, Gatekeeper-validated, or signed
+by NetScale 1. Users who require a fully trusted chain should build from source
+or wait for a notarized release from a maintainer with the required credentials.
+
+### Installing a community build
+
+After extracting the ZIP, verify the files from inside its directory:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+codesign --verify --deep --strict Ech0Mac.app
+codesign --verify --strict Ech0VirtualMic.driver
+```
+
+Then:
+
+1. close any running copy of Ech0Mac;
+2. move `Ech0Mac.app` to `/Applications`;
+3. copy `Ech0VirtualMic.driver` to
+   `/Library/Audio/Plug-Ins/HAL/` with administrator authorization;
+4. reboot the Mac at a convenient time so Core Audio loads the driver;
+5. if macOS blocks the unnotarized app, use the per-app **Open Anyway** control
+   in System Settings → Privacy & Security after verifying the hash;
+6. confirm in Audio MIDI Setup that `Ech0 Virtual Microphone` has two input
+   channels and no output channels.
+
+Do not globally disable Gatekeeper and do not remove quarantine recursively
+from unrelated files.
+
+### Upgrade from a pre-public build
+
+Version 0.2.0 changes the app and driver identifiers from `net.ech0.*` to
+`io.github.netscale1.ech0.*`. Replace the app and driver together; mixing the
+old app with the new driver leaves the dedicated endpoint undiscoverable.
+Trusted-device and receiver identity files remain under
+`~/Library/Application Support/Ech0Mac`, so replacing both bundles does not by
+itself erase pairing. Launch at login may need to be enabled again because
+macOS sees the new app identifier.
 
 ## Recoverable local installation
 

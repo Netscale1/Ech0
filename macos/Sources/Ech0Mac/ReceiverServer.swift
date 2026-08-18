@@ -144,7 +144,7 @@ final class ReceiverServer: @unchecked Sendable {
     var trustSenderFromPairing: ((ClientHello) -> Bool)?
     var onCaptureStatus: ((CaptureStatus) -> Void)?
 
-    private let queue = DispatchQueue(label: "net.ech0.receiver.server")
+    private let queue = DispatchQueue(label: "io.github.netscale1.ech0.receiver")
     private let queueKey = DispatchSpecificKey<Void>()
     private let targetBufferMs: Int
     private let connectionTimeout: TimeInterval

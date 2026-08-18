@@ -26,10 +26,14 @@ DOTNET_CLI_TELEMETRY_OPTOUT=1 "$dotnet_bin" publish \
   -o "$output_dir/publish"
 
 cp "$output_dir/publish/Ech0Windows.exe" "$output_dir/Ech0Windows.exe"
-(cd "$output_dir" && zip -q Ech0Windows-win-x64.zip Ech0Windows.exe)
+cp "$repo_root/LICENSE" "$output_dir/LICENSE"
+cp "$repo_root/NOTICE" "$output_dir/NOTICE"
+cp "$repo_root/THIRD_PARTY_NOTICES.md" "$output_dir/THIRD_PARTY_NOTICES.md"
+(cd "$output_dir" && zip -q Ech0Windows-win-x64.zip \
+  Ech0Windows.exe LICENSE NOTICE THIRD_PARTY_NOTICES.md)
 shasum -a 256 \
   "$output_dir/Ech0Windows.exe" \
   "$output_dir/Ech0Windows-win-x64.zip" > "$output_dir/SHA256SUMS"
 
-echo "Unsigned development build: use scripts/release-windows.ps1 with a certificate for update packages." >&2
+echo "Unsigned community build: no automatic update package was created." >&2
 echo "$output_dir/Ech0Windows-win-x64.zip"

@@ -1,4 +1,9 @@
-# Ech0 Review Findings
+# Historical Ech0 review findings
+
+> This file preserves earlier engineering findings and their acceptance
+> evidence. Identifiers, dependencies, and release constraints recorded here
+> describe the build at the time of each check; use the README and setup/release
+> guides for current behavior.
 
 This file is the engineering backlog for the repository-wide review started on 2026-07-16. A finding is closed only when its code change, regression coverage, and platform-specific verification are recorded here.
 

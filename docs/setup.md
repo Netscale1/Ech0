@@ -4,10 +4,31 @@ For the complete Windows-to-Mac microphone workflow, see [Windows → Mac setup]
 
 ## macOS
 
-1. Install `BlackHole 2ch` from the upstream project: [BlackHole](https://github.com/ExistentialAudio/BlackHole)
-2. Open Audio MIDI Setup and confirm `BlackHole 2ch` appears as an input/output device.
-3. Build and run the app in `macos/`.
-4. Use the app button to set the input device prepared by Ech0Mac as the current system input when needed. With the dedicated driver installed, this is `Ech0 Virtual Microphone`.
+Ech0 supports two audio endpoints, in this order:
+
+1. **Recommended:** the bundled, input-only `Ech0 Virtual Microphone` driver.
+2. **Optional fallback:** an existing `BlackHole 2ch` installation from the
+   [upstream BlackHole project](https://github.com/ExistentialAudio/BlackHole).
+
+BlackHole is not required when the Ech0 driver is available. At startup Ech0
+selects the dedicated driver first, otherwise it selects BlackHole. Startup
+fails with a clear setup error only when neither device exists. Ech0 changes
+BlackHole to the protocol's 48 kHz rate only when BlackHole was actually chosen;
+it does not modify BlackHole when using the dedicated driver.
+
+Build both the app and dedicated driver:
+
+```sh
+./scripts/macos-release.sh check
+```
+
+Follow [the macOS release and installation guide](macos-release.md) to install
+the driver. Then run Ech0Mac and use its button to make the selected endpoint
+the system input when needed.
+
+BlackHole may independently be part of a screen-sharing or remote-desktop audio
+route. Removing it from Ech0's requirements does not mean it is safe to
+uninstall from the Mac; inspect that route separately.
 
 ## Windows
 
@@ -28,8 +49,8 @@ For the complete Windows-to-Mac microphone workflow, see [Windows → Mac setup]
 
 ## Known Constraints
 
-- No remote/internet relay
+- No remote/internet relay; use the encrypted local protocol on a trusted LAN
 - No multi-client mixing
 - No recording mode
-- `BlackHole 2ch` installation is manual
-- No transport encryption; use only on a trusted LAN
+- Apple Silicon only for version 0.2.0
+- Community macOS builds are not notarized

@@ -1,0 +1,82 @@
+name: Community Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Verify tag version
+        run: test "${GITHUB_REF_NAME#v}" = "$(plutil -extract CFBundleShortVersionString raw macos/Info.plist)"
+      - name: Build and validate macOS community package
+        run: |
+          ./scripts/macos-release.sh check
+          ./scripts/macos-release.sh package-community
+          shasum -a 256 dist/macos/Ech0Mac-*-community.zip > dist/macos/Ech0Mac-community.zip.sha256
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-community
+          path: |
+            dist/macos/Ech0Mac-*-community.zip
+            dist/macos/Ech0Mac-community.zip.sha256
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5.2.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Build and validate Windows community package
+        shell: pwsh
+        run: ./scripts/release-windows.ps1 -AllowUnsignedDevelopment
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-community
+          path: |
+            dist/windows/Ech0Windows-win-x64.zip
+            dist/windows/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    needs:
+      - macos
+      - windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release notes
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download validated artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes="docs/release-notes/$version.md"
+          test -f "$notes"
+          mapfile -d '' files < <(find artifacts -type f -print0)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "Ech0 $GITHUB_REF_NAME" --notes-file "$notes"
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --title "Ech0 $GITHUB_REF_NAME" --notes-file "$notes"
+          fi

@@ -159,7 +159,7 @@ internal sealed class AgentApplicationContext : ApplicationContext
         {
             AgentState.Connecting => "Connecting",
             AgentState.PairingRequired => "Pairing required",
-            AgentState.Idle => "Connected — waiting for BlackHole",
+            AgentState.Idle => "Connected — waiting for microphone demand",
             AgentState.DemandWaitingForDevice => "Microphone unavailable",
             AgentState.Capturing => "Transmitting microphone",
             AgentState.Paused => "Automatic capture paused",
