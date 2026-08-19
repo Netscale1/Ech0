@@ -440,7 +440,9 @@ public sealed class ProtocolTests
         var reason = await ReconnectWait.WaitAsync(
             fallback.Task,
             Task.FromResult(true),
-            CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1));
+            TestContext.Current.CancellationToken).WaitAsync(
+                TimeSpan.FromSeconds(1),
+                TestContext.Current.CancellationToken);
 
         Assert.Equal(ReconnectWakeReason.ServiceAvailable, reason);
     }
@@ -452,7 +454,7 @@ public sealed class ProtocolTests
         var wait = ReconnectWait.WaitAsync(
             fallback.Task,
             Task.FromResult(false),
-            CancellationToken.None);
+            TestContext.Current.CancellationToken);
 
         Assert.False(wait.IsCompleted);
         fallback.SetResult();
@@ -468,7 +470,7 @@ public sealed class ProtocolTests
         var reason = await ReconnectWait.WaitAsync(
             Task.CompletedTask,
             serviceAvailable.Task,
-            CancellationToken.None);
+            TestContext.Current.CancellationToken);
 
         Assert.Equal(ReconnectWakeReason.FallbackDelay, reason);
     }
@@ -493,7 +495,7 @@ public sealed class ProtocolTests
         cancellation.Cancel();
 
         _ = await DnsSdDiscovery.WaitForServiceAsync(cancellation.Token)
-            .WaitAsync(TimeSpan.FromSeconds(5));
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     }
 
     [Fact]
