@@ -494,7 +494,9 @@ public sealed class ProtocolTests
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 
-        _ = await DnsSdDiscovery.WaitForServiceAsync(cancellation.Token)
+        _ = await DnsSdDiscovery.WaitForServiceAsync(
+                TimeSpan.FromSeconds(5),
+                cancellation.Token)
             .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     }
 

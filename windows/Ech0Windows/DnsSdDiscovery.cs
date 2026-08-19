@@ -24,14 +24,18 @@ internal static class DnsSdDiscovery
         return serviceName is null ? null : await ResolveAsync(serviceName, timeoutSource.Token);
     }
 
-    public static async Task<bool> WaitForServiceAsync(CancellationToken cancellationToken)
+    public static async Task<bool> WaitForServiceAsync(
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
         if (!OperatingSystem.IsWindowsVersionAtLeast(10))
         {
             return false;
         }
 
-        return await BrowseFirstNameAsync(cancellationToken) is not null;
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(timeout);
+        return await BrowseFirstNameAsync(timeoutSource.Token) is not null;
     }
 
     private static async Task<string?> BrowseFirstNameAsync(CancellationToken cancellationToken)

@@ -56,6 +56,7 @@ internal static class ReconnectWait
 
 internal sealed class ConnectionWorker : IAsyncDisposable
 {
+    private static readonly TimeSpan DiscoveryWindow = TimeSpan.FromSeconds(30);
     private readonly Ech0Settings settings;
     private readonly AudioCaptureService capture = new();
     private readonly SemaphoreSlim writeGate = new(1, 1);
@@ -136,7 +137,9 @@ internal sealed class ConnectionWorker : IAsyncDisposable
         {
             try
             {
-                return await DnsSdDiscovery.WaitForServiceAsync(discoveryCancellationToken);
+                return await DnsSdDiscovery.WaitForServiceAsync(
+                    DiscoveryWindow,
+                    discoveryCancellationToken);
             }
             catch (OperationCanceledException) when (discoveryCancellationToken.IsCancellationRequested)
             {
