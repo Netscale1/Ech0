@@ -210,6 +210,10 @@ internal sealed class ConnectionWorker : IAsyncDisposable
                         Log.Write("reconnect_discovery_wake");
                         serviceAvailable = null;
                     }
+                    else if (serviceAvailable?.IsCompleted == true)
+                    {
+                        serviceAvailable = null;
+                    }
                 }
                 catch (OperationCanceledException)
                 {
