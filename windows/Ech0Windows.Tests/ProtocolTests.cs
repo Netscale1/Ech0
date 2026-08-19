@@ -25,6 +25,14 @@ public sealed class ProtocolTests
     }
 
     [Fact]
+    public async Task MdnsWatcherStartsAndStopsWithTheWindowsApi()
+    {
+        await using var watcher = new DnsSdDiscovery.ServiceWatcher();
+
+        Assert.True(watcher.Start());
+    }
+
+    [Fact]
     public void LoggingIoFailureDoesNotEscapeIntoRuntime()
     {
         Assert.False(Log.TryWrite(() => throw new IOException("disk unavailable")));
