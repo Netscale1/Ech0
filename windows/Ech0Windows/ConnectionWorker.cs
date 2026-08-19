@@ -56,7 +56,6 @@ internal static class ReconnectWait
 
 internal sealed class ConnectionWorker : IAsyncDisposable
 {
-    private static readonly TimeSpan DiscoveryWindow = TimeSpan.FromSeconds(30);
     private readonly Ech0Settings settings;
     private readonly AudioCaptureService capture = new();
     private readonly SemaphoreSlim writeGate = new(1, 1);
@@ -111,37 +110,37 @@ internal sealed class ConnectionWorker : IAsyncDisposable
     {
         var backoffSeconds = 1;
         var discoveryStarted = false;
-        CancellationTokenSource? discoveryStop = null;
+        DnsSdDiscovery.ServiceWatcher? discovery = null;
         Task<bool>? serviceAvailable = null;
 
         async Task StopDiscoveryAsync()
         {
-            discoveryStop?.Cancel();
+            if (discovery is not null)
+            {
+                await discovery.DisposeAsync();
+            }
             if (serviceAvailable is not null)
             {
                 try
                 {
                     await serviceAvailable;
                 }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                catch (OperationCanceledException)
                 {
                 }
             }
-            discoveryStop?.Dispose();
-            discoveryStop = null;
+            discovery = null;
             serviceAvailable = null;
             discoveryStarted = false;
         }
 
-        async Task<bool> WatchForServiceAsync(CancellationToken discoveryCancellationToken)
+        async Task<bool> WatchForServiceAsync(DnsSdDiscovery.ServiceWatcher watcher)
         {
             try
             {
-                return await DnsSdDiscovery.WaitForServiceAsync(
-                    DiscoveryWindow,
-                    discoveryCancellationToken);
+                return await watcher.WaitAsync(cancellationToken);
             }
-            catch (OperationCanceledException) when (discoveryCancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 return false;
             }
@@ -194,9 +193,19 @@ internal sealed class ConnectionWorker : IAsyncDisposable
 
                 if (!discoveryStarted)
                 {
-                    discoveryStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    serviceAvailable = WatchForServiceAsync(discoveryStop.Token);
+                    try
+                    {
+                        discovery = DnsSdDiscovery.StartServiceWatcher();
+                    }
+                    catch (Exception exception)
+                    {
+                        Log.Write("discovery_unavailable", exception.GetType().Name);
+                    }
                     discoveryStarted = true;
+                }
+                if (discovery is not null && serviceAvailable is null)
+                {
+                    serviceAvailable = WatchForServiceAsync(discovery);
                 }
 
                 try
@@ -212,6 +221,11 @@ internal sealed class ConnectionWorker : IAsyncDisposable
                     }
                     else if (serviceAvailable?.IsCompleted == true)
                     {
+                        if (discovery is not null)
+                        {
+                            await discovery.DisposeAsync();
+                            discovery = null;
+                        }
                         serviceAvailable = null;
                     }
                 }

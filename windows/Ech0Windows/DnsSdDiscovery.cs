@@ -1,9 +1,39 @@
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Threading.Channels;
 
 namespace Ech0.Windows;
 
 internal sealed record DiscoveredService(string InstanceName, string HostName, int Port);
+
+internal sealed class ServiceAvailabilityEvents
+{
+    private readonly Channel<byte> events = Channel.CreateBounded<byte>(
+        new BoundedChannelOptions(1)
+        {
+            AllowSynchronousContinuations = false,
+            FullMode = BoundedChannelFullMode.DropWrite,
+            SingleReader = true,
+            SingleWriter = false,
+        });
+
+    public void Notify() => events.Writer.TryWrite(0);
+
+    public void Complete() => events.Writer.TryComplete();
+
+    public async Task<bool> WaitAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            _ = await events.Reader.ReadAsync(cancellationToken);
+            return true;
+        }
+        catch (ChannelClosedException)
+        {
+            return false;
+        }
+    }
+}
 
 internal static class DnsSdDiscovery
 {
@@ -36,6 +66,113 @@ internal static class DnsSdDiscovery
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
         return await BrowseFirstNameAsync(timeoutSource.Token) is not null;
+    }
+
+    public static ServiceWatcher? StartServiceWatcher()
+    {
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10))
+        {
+            return null;
+        }
+
+        var watcher = new ServiceWatcher();
+        return watcher.Start() ? watcher : null;
+    }
+
+    internal sealed class ServiceWatcher : IAsyncDisposable
+    {
+        private readonly ServiceAvailabilityEvents events = new();
+        private readonly TaskCompletionSource stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly BrowseCallback callback;
+        private readonly IntPtr queryName;
+        private DnsServiceCancel cancel;
+        private int disposed;
+
+        public ServiceWatcher()
+        {
+            callback = OnBrowse;
+            queryName = Marshal.StringToHGlobalUni("_ech0._tcp.local");
+        }
+
+        public Task<bool> WaitAsync(CancellationToken cancellationToken) =>
+            events.WaitAsync(cancellationToken);
+
+        public bool Start()
+        {
+            var request = new DnsServiceBrowseRequest
+            {
+                Version = 1,
+                InterfaceIndex = 0,
+                QueryName = queryName,
+                Callback = callback,
+                QueryContext = IntPtr.Zero,
+            };
+            var status = DnsServiceBrowse(ref request, ref cancel);
+            if (status == DnsRequestPending)
+            {
+                return true;
+            }
+
+            events.Complete();
+            Marshal.FreeHGlobal(queryName);
+            disposed = 1;
+            return false;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+            {
+                return;
+            }
+
+            events.Complete();
+            if (cancel.Reserved != IntPtr.Zero)
+            {
+                var status = DnsServiceBrowseCancel(ref cancel);
+                if (status == 0)
+                {
+                    await stopped.Task;
+                }
+            }
+            Marshal.FreeHGlobal(queryName);
+            GC.KeepAlive(callback);
+        }
+
+        private void OnBrowse(uint status, IntPtr _, IntPtr records)
+        {
+            try
+            {
+                if (status == ErrorCancelled)
+                {
+                    return;
+                }
+                if (status != 0)
+                {
+                    events.Complete();
+                    return;
+                }
+                for (var record = records; record != IntPtr.Zero; record = Marshal.ReadIntPtr(record, 0))
+                {
+                    if ((ushort)Marshal.ReadInt16(record, IntPtr.Size * 2) == DnsTypePtr)
+                    {
+                        events.Notify();
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                if (records != IntPtr.Zero)
+                {
+                    DnsRecordListFree(records, 1);
+                }
+                if (status == ErrorCancelled)
+                {
+                    stopped.TrySetResult();
+                }
+            }
+        }
     }
 
     private static async Task<string?> BrowseFirstNameAsync(CancellationToken cancellationToken)
