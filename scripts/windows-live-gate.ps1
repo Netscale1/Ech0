@@ -69,7 +69,7 @@ function Send-ControlCommand {
     param(
         [Parameter(Mandatory)][string]$Token,
         [Parameter(Mandatory)][string]$Command,
-        [int]$TimeoutMilliseconds = 2_000
+        [int]$TimeoutMilliseconds = 2000
     )
 
     $pipe = [IO.Pipes.NamedPipeClientStream]::new(
