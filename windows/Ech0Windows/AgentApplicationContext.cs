@@ -51,7 +51,14 @@ internal sealed class AgentApplicationContext : ApplicationContext
 
         if (!settings.IsConfigured)
         {
-            ShowSettings();
+            if (automationControlOptions is null)
+            {
+                ShowSettings();
+            }
+            else
+            {
+                SetState(AgentState.PairingRequired, null);
+            }
         }
         else
         {
