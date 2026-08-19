@@ -18,8 +18,8 @@ A minimal user-space driver.
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
-#include <stdatomic.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/syslog.h>
 
 //==================================================================================================
@@ -134,7 +134,7 @@ static Boolean								gBox_Acquired					= true;
 #define										kDevice_UID						"io.github.netscale1.ech0.virtual-mic.device"
 #define										kDevice_ModelUID				"io.github.netscale1.ech0.virtual-mic.model"
 static pthread_mutex_t						gDevice_IOMutex					= PTHREAD_MUTEX_INITIALIZER;
-static Float64								gDevice_SampleRate				= 48000.0;
+static const Float64						gDevice_SampleRate				= 48000.0;
 static UInt64								gDevice_IOIsRunning				= 0;
 static const UInt32							kDevice_RingBufferSize			= 16384;
 static Float64								gDevice_HostTicksPerFrame		= 0.0;
@@ -146,15 +146,18 @@ static UInt64								gDevice_AnchorHostTime			= 0;
 // Core Audio reads the newest available samples as interleaved stereo Float32.
 enum { kPCMBufferCapacity = 96000 };
 static int16_t								gPCMBuffer[kPCMBufferCapacity];
-static atomic_uint_fast64_t					gPCMReadIndex					= 0;
-static atomic_uint_fast64_t					gPCMWriteIndex					= 0;
+static pthread_mutex_t						gPCMBufferMutex				= PTHREAD_MUTEX_INITIALIZER;
+// Protected by gPCMBufferMutex: write >= read and write - read <= capacity.
+static UInt64								gPCMReadIndex					= 0;
+static UInt64								gPCMWriteIndex					= 0;
 
 static OSStatus	Ech0VirtualMic_WritePCM(UInt32 inDataSize, const void* inData)
 {
 	if(inDataSize == 0)
 	{
-		atomic_store_explicit(&gPCMReadIndex, 0, memory_order_release);
-		atomic_store_explicit(&gPCMWriteIndex, 0, memory_order_release);
+		pthread_mutex_lock(&gPCMBufferMutex);
+		gPCMReadIndex = gPCMWriteIndex;
+		pthread_mutex_unlock(&gPCMBufferMutex);
 		return noErr;
 	}
 	if(inData == NULL)
@@ -173,12 +176,26 @@ static OSStatus	Ech0VirtualMic_WritePCM(UInt32 inDataSize, const void* inData)
 		samples += sampleCount - kPCMBufferCapacity;
 		sampleCount = kPCMBufferCapacity;
 	}
-	UInt64 writeIndex = atomic_load_explicit(&gPCMWriteIndex, memory_order_relaxed);
-	for(UInt64 index = 0; index < sampleCount; ++index)
+	pthread_mutex_lock(&gPCMBufferMutex);
+	UInt64 available = gPCMWriteIndex - gPCMReadIndex;
+	UInt64 freeSamples = kPCMBufferCapacity - available;
+	if(sampleCount > freeSamples)
 	{
-		gPCMBuffer[(writeIndex + index) % kPCMBufferCapacity] = samples[index];
+		gPCMReadIndex += sampleCount - freeSamples;
 	}
-	atomic_store_explicit(&gPCMWriteIndex, writeIndex + sampleCount, memory_order_release);
+	UInt64 writeOffset = gPCMWriteIndex % kPCMBufferCapacity;
+	UInt64 firstCopy = kPCMBufferCapacity - writeOffset;
+	if(firstCopy > sampleCount)
+	{
+		firstCopy = sampleCount;
+	}
+	memcpy(gPCMBuffer + writeOffset, samples, firstCopy * sizeof(int16_t));
+	if(firstCopy < sampleCount)
+	{
+		memcpy(gPCMBuffer, samples + firstCopy, (sampleCount - firstCopy) * sizeof(int16_t));
+	}
+	gPCMWriteIndex += sampleCount;
+	pthread_mutex_unlock(&gPCMBufferMutex);
 	return noErr;
 }
 
@@ -581,9 +598,8 @@ static OSStatus	Ech0VirtualMic_PerformDeviceConfigurationChange(AudioServerPlugI
 	//	means that the only notifications that would need to be sent here would be for either
 	//	custom properties the HAL doesn't know about or for controls.
 	//
-	//	For the device implemented by this driver, only sample rate changes go through this process
-	//	as it is the only state that can be changed for the device that isn't a control. For this
-	//	change, the new sample rate is passed in the inChangeAction argument.
+	//	Ech0 is fixed at 48 kHz. A request for the current rate is a harmless no-op; every other
+	//	rate is rejected.
 
 	#pragma unused(inChangeInfo)
 
@@ -593,23 +609,7 @@ static OSStatus	Ech0VirtualMic_PerformDeviceConfigurationChange(AudioServerPlugI
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Ech0VirtualMic_PerformDeviceConfigurationChange: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "Ech0VirtualMic_PerformDeviceConfigurationChange: bad device ID");
-	FailWithAction((inChangeAction != 44100) && (inChangeAction != 48000), theAnswer = kAudioHardwareBadObjectError, Done, "Ech0VirtualMic_PerformDeviceConfigurationChange: bad sample rate");
-
-	//	lock the state mutex
-	pthread_mutex_lock(&gPlugIn_StateMutex);
-
-	//	change the sample rate
-	gDevice_SampleRate = inChangeAction;
-
-	//	recalculate the state that depends on the sample rate
-	struct mach_timebase_info theTimeBaseInfo;
-	mach_timebase_info(&theTimeBaseInfo);
-	Float64 theHostClockFrequency = (Float64)theTimeBaseInfo.denom / (Float64)theTimeBaseInfo.numer;
-	theHostClockFrequency *= 1000000000.0;
-	gDevice_HostTicksPerFrame = theHostClockFrequency / gDevice_SampleRate;
-
-	//	unlock the state mutex
-	pthread_mutex_unlock(&gPlugIn_StateMutex);
+	FailWithAction(inChangeAction != 48000, theAnswer = kAudioHardwareUnsupportedOperationError, Done, "Ech0VirtualMic_PerformDeviceConfigurationChange: unsupported sample rate");
 
 Done:
 	return theAnswer;
@@ -1912,6 +1912,7 @@ static OSStatus	Ech0VirtualMic_IsDevicePropertySettable(AudioServerPlugInDriverR
 		case kAudioDevicePropertyStreams:
 		case kAudioObjectPropertyControlList:
 		case kAudioDevicePropertySafetyOffset:
+		case kAudioDevicePropertyNominalSampleRate:
 		case kAudioDevicePropertyAvailableNominalSampleRates:
 		case kAudioDevicePropertyIsHidden:
 		case kAudioDevicePropertyPreferredChannelsForStereo:
@@ -1922,7 +1923,6 @@ static OSStatus	Ech0VirtualMic_IsDevicePropertySettable(AudioServerPlugInDriverR
 			*outIsSettable = false;
 			break;
 
-		case kAudioDevicePropertyNominalSampleRate:
 		case kPlugIn_CustomPropertyID:
 			*outIsSettable = true;
 			break;
@@ -2067,7 +2067,7 @@ static OSStatus	Ech0VirtualMic_GetDevicePropertyDataSize(AudioServerPlugInDriver
 			break;
 
 		case kAudioDevicePropertyAvailableNominalSampleRates:
-			*outDataSize = 2 * sizeof(AudioValueRange);
+			*outDataSize = sizeof(AudioValueRange);
 			break;
 
 		case kAudioDevicePropertyIsHidden:
@@ -2428,21 +2428,16 @@ static OSStatus	Ech0VirtualMic_GetDevicePropertyData(AudioServerPlugInDriverRef 
 			theNumberItemsToFetch = inDataSize / sizeof(AudioValueRange);
 
 			//	clamp it to the number of items we have
-			if(theNumberItemsToFetch > 2)
+			if(theNumberItemsToFetch > 1)
 			{
-				theNumberItemsToFetch = 2;
+				theNumberItemsToFetch = 1;
 			}
 
 			//	fill out the return array
 			if(theNumberItemsToFetch > 0)
 			{
-				((AudioValueRange*)outData)[0].mMinimum = 44100.0;
-				((AudioValueRange*)outData)[0].mMaximum = 44100.0;
-			}
-			if(theNumberItemsToFetch > 1)
-			{
-				((AudioValueRange*)outData)[1].mMinimum = 48000.0;
-				((AudioValueRange*)outData)[1].mMaximum = 48000.0;
+				((AudioValueRange*)outData)[0].mMinimum = 48000.0;
+				((AudioValueRange*)outData)[0].mMaximum = 48000.0;
 			}
 
 			//	report how much we wrote
@@ -2537,8 +2532,6 @@ static OSStatus	Ech0VirtualMic_SetDevicePropertyData(AudioServerPlugInDriverRef 
 
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	Float64 theOldSampleRate;
-	UInt64 theNewSampleRate;
 
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Ech0VirtualMic_SetDevicePropertyData: bad driver reference");
@@ -2560,28 +2553,9 @@ static OSStatus	Ech0VirtualMic_SetDevicePropertyData(AudioServerPlugInDriverRef 
 			break;
 
 		case kAudioDevicePropertyNominalSampleRate:
-			//	Changing the sample rate needs to be handled via the
-			//	RequestConfigChange/PerformConfigChange machinery.
-
 			//	check the arguments
 			FailWithAction(inDataSize != sizeof(Float64), theAnswer = kAudioHardwareBadPropertySizeError, Done, "Ech0VirtualMic_SetDevicePropertyData: wrong size for the data for kAudioDevicePropertyNominalSampleRate");
-			FailWithAction((*((const Float64*)inData) != 44100.0) && (*((const Float64*)inData) != 48000.0), theAnswer = kAudioHardwareIllegalOperationError, Done, "Ech0VirtualMic_SetDevicePropertyData: unsupported value for kAudioDevicePropertyNominalSampleRate");
-
-			//	make sure that the new value is different than the old value
-			pthread_mutex_lock(&gPlugIn_StateMutex);
-			theOldSampleRate = gDevice_SampleRate;
-			pthread_mutex_unlock(&gPlugIn_StateMutex);
-			if(*((const Float64*)inData) != theOldSampleRate)
-			{
-				*outNumberPropertiesChanged = 1;
-				outChangedAddresses[0].mSelector = kAudioDevicePropertyNominalSampleRate;
-				outChangedAddresses[0].mScope = kAudioObjectPropertyScopeGlobal;
-				outChangedAddresses[0].mElement = kAudioObjectPropertyElementMain;
-				//	we dispatch this so that the change can happen asynchronously
-				theOldSampleRate = *((const Float64*)inData);
-				theNewSampleRate = (UInt64)theOldSampleRate;
-				dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, theNewSampleRate, NULL); });
-			}
+			FailWithAction(*((const Float64*)inData) != 48000.0, theAnswer = kAudioHardwareUnsupportedOperationError, Done, "Ech0VirtualMic_SetDevicePropertyData: unsupported sample rate");
 			break;
 
 		default:
@@ -2666,14 +2640,14 @@ static OSStatus	Ech0VirtualMic_IsStreamPropertySettable(AudioServerPlugInDriverR
 		case kAudioStreamPropertyTerminalType:
 		case kAudioStreamPropertyStartingChannel:
 		case kAudioStreamPropertyLatency:
+		case kAudioStreamPropertyVirtualFormat:
+		case kAudioStreamPropertyPhysicalFormat:
 		case kAudioStreamPropertyAvailableVirtualFormats:
 		case kAudioStreamPropertyAvailablePhysicalFormats:
 			*outIsSettable = false;
 			break;
 
 		case kAudioStreamPropertyIsActive:
-		case kAudioStreamPropertyVirtualFormat:
-		case kAudioStreamPropertyPhysicalFormat:
 			*outIsSettable = true;
 			break;
 
@@ -2753,7 +2727,7 @@ static OSStatus	Ech0VirtualMic_GetStreamPropertyDataSize(AudioServerPlugInDriver
 
 		case kAudioStreamPropertyAvailableVirtualFormats:
 		case kAudioStreamPropertyAvailablePhysicalFormats:
-			*outDataSize = 2 * sizeof(AudioStreamRangedDescription);
+			*outDataSize = sizeof(AudioStreamRangedDescription);
 			break;
 
 		default:
@@ -2896,15 +2870,15 @@ static OSStatus	Ech0VirtualMic_GetStreamPropertyData(AudioServerPlugInDriverRef 
 			theNumberItemsToFetch = inDataSize / sizeof(AudioStreamRangedDescription);
 
 			//	clamp it to the number of items we have
-			if(theNumberItemsToFetch > 2)
+			if(theNumberItemsToFetch > 1)
 			{
-				theNumberItemsToFetch = 2;
+				theNumberItemsToFetch = 1;
 			}
 
 			//	fill out the return array
 			if(theNumberItemsToFetch > 0)
 			{
-				((AudioStreamRangedDescription*)outData)[0].mFormat.mSampleRate = 44100.0;
+				((AudioStreamRangedDescription*)outData)[0].mFormat.mSampleRate = 48000.0;
 				((AudioStreamRangedDescription*)outData)[0].mFormat.mFormatID = kAudioFormatLinearPCM;
 				((AudioStreamRangedDescription*)outData)[0].mFormat.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagsNativeEndian | kAudioFormatFlagIsPacked;
 				((AudioStreamRangedDescription*)outData)[0].mFormat.mBytesPerPacket = 8;
@@ -2912,21 +2886,8 @@ static OSStatus	Ech0VirtualMic_GetStreamPropertyData(AudioServerPlugInDriverRef 
 				((AudioStreamRangedDescription*)outData)[0].mFormat.mBytesPerFrame = 8;
 				((AudioStreamRangedDescription*)outData)[0].mFormat.mChannelsPerFrame = 2;
 				((AudioStreamRangedDescription*)outData)[0].mFormat.mBitsPerChannel = 32;
-				((AudioStreamRangedDescription*)outData)[0].mSampleRateRange.mMinimum = 44100.0;
-				((AudioStreamRangedDescription*)outData)[0].mSampleRateRange.mMaximum = 44100.0;
-			}
-			if(theNumberItemsToFetch > 1)
-			{
-				((AudioStreamRangedDescription*)outData)[1].mFormat.mSampleRate = 48000.0;
-				((AudioStreamRangedDescription*)outData)[1].mFormat.mFormatID = kAudioFormatLinearPCM;
-				((AudioStreamRangedDescription*)outData)[1].mFormat.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagsNativeEndian | kAudioFormatFlagIsPacked;
-				((AudioStreamRangedDescription*)outData)[1].mFormat.mBytesPerPacket = 8;
-				((AudioStreamRangedDescription*)outData)[1].mFormat.mFramesPerPacket = 1;
-				((AudioStreamRangedDescription*)outData)[1].mFormat.mBytesPerFrame = 8;
-				((AudioStreamRangedDescription*)outData)[1].mFormat.mChannelsPerFrame = 2;
-				((AudioStreamRangedDescription*)outData)[1].mFormat.mBitsPerChannel = 32;
-				((AudioStreamRangedDescription*)outData)[1].mSampleRateRange.mMinimum = 48000.0;
-				((AudioStreamRangedDescription*)outData)[1].mSampleRateRange.mMaximum = 48000.0;
+				((AudioStreamRangedDescription*)outData)[0].mSampleRateRange.mMinimum = 48000.0;
+				((AudioStreamRangedDescription*)outData)[0].mSampleRateRange.mMaximum = 48000.0;
 			}
 
 			//	report how much we wrote
@@ -2948,8 +2909,6 @@ static OSStatus	Ech0VirtualMic_SetStreamPropertyData(AudioServerPlugInDriverRef 
 
 	//	declare the local variables
 	OSStatus theAnswer = 0;
-	Float64 theOldSampleRate;
-	UInt64 theNewSampleRate;
 
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "Ech0VirtualMic_SetStreamPropertyData: bad driver reference");
@@ -2998,10 +2957,8 @@ static OSStatus	Ech0VirtualMic_SetStreamPropertyData(AudioServerPlugInDriverRef 
 
 		case kAudioStreamPropertyVirtualFormat:
 		case kAudioStreamPropertyPhysicalFormat:
-			//	Changing the stream format needs to be handled via the
-			//	RequestConfigChange/PerformConfigChange machinery. Note that because this
-			//	device only supports 2 channel 32 bit float data, the only thing that can
-			//	change is the sample rate.
+			//	The stream format is fixed. Accept the current description as a no-op and
+			//	reject every other format.
 			FailWithAction(inDataSize != sizeof(AudioStreamBasicDescription), theAnswer = kAudioHardwareBadPropertySizeError, Done, "Ech0VirtualMic_SetStreamPropertyData: wrong size for the data for kAudioStreamPropertyPhysicalFormat");
 			FailWithAction(((const AudioStreamBasicDescription*)inData)->mFormatID != kAudioFormatLinearPCM, theAnswer = kAudioDeviceUnsupportedFormatError, Done, "Ech0VirtualMic_SetStreamPropertyData: unsupported format ID for kAudioStreamPropertyPhysicalFormat");
 			FailWithAction(((const AudioStreamBasicDescription*)inData)->mFormatFlags != (kAudioFormatFlagIsFloat | kAudioFormatFlagsNativeEndian | kAudioFormatFlagIsPacked), theAnswer = kAudioDeviceUnsupportedFormatError, Done, "Ech0VirtualMic_SetStreamPropertyData: unsupported format flags for kAudioStreamPropertyPhysicalFormat");
@@ -3010,19 +2967,7 @@ static OSStatus	Ech0VirtualMic_SetStreamPropertyData(AudioServerPlugInDriverRef 
 			FailWithAction(((const AudioStreamBasicDescription*)inData)->mBytesPerFrame != 8, theAnswer = kAudioDeviceUnsupportedFormatError, Done, "Ech0VirtualMic_SetStreamPropertyData: unsupported bytes per frame for kAudioStreamPropertyPhysicalFormat");
 			FailWithAction(((const AudioStreamBasicDescription*)inData)->mChannelsPerFrame != 2, theAnswer = kAudioDeviceUnsupportedFormatError, Done, "Ech0VirtualMic_SetStreamPropertyData: unsupported channels per frame for kAudioStreamPropertyPhysicalFormat");
 			FailWithAction(((const AudioStreamBasicDescription*)inData)->mBitsPerChannel != 32, theAnswer = kAudioDeviceUnsupportedFormatError, Done, "Ech0VirtualMic_SetStreamPropertyData: unsupported bits per channel for kAudioStreamPropertyPhysicalFormat");
-			FailWithAction((((const AudioStreamBasicDescription*)inData)->mSampleRate != 44100.0) && (((const AudioStreamBasicDescription*)inData)->mSampleRate != 48000.0), theAnswer = kAudioHardwareIllegalOperationError, Done, "Ech0VirtualMic_SetStreamPropertyData: unsupported sample rate for kAudioStreamPropertyPhysicalFormat");
-
-			//	If we made it this far, the requested format is something we support, so make sure the sample rate is actually different
-			pthread_mutex_lock(&gPlugIn_StateMutex);
-			theOldSampleRate = gDevice_SampleRate;
-			pthread_mutex_unlock(&gPlugIn_StateMutex);
-			if(((const AudioStreamBasicDescription*)inData)->mSampleRate != theOldSampleRate)
-			{
-				//	we dispatch this so that the change can happen asynchronously
-				theOldSampleRate = ((const AudioStreamBasicDescription*)inData)->mSampleRate;
-				theNewSampleRate = (UInt64)theOldSampleRate;
-				dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, theNewSampleRate, NULL); });
-			}
+			FailWithAction(((const AudioStreamBasicDescription*)inData)->mSampleRate != 48000.0, theAnswer = kAudioHardwareUnsupportedOperationError, Done, "Ech0VirtualMic_SetStreamPropertyData: unsupported sample rate");
 			break;
 
 		default:
@@ -4183,8 +4128,8 @@ Done:
 
 static OSStatus	Ech0VirtualMic_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo, void* ioMainBuffer, void* ioSecondaryBuffer)
 {
-	//	This is called to actuall perform a given operation. For this device, all we need to do is
-	//	clear the buffer for the ReadInput operation.
+	//	This is called to perform a given operation. Ech0 turns queued mono Int16 samples into the
+	//	stereo Float32 input expected by Core Audio. Missing samples remain silent.
 
 	#pragma unused(inClientID, inIOCycleInfo, ioSecondaryBuffer)
 
@@ -4196,29 +4141,27 @@ static OSStatus	Ech0VirtualMic_DoIOOperation(AudioServerPlugInDriverRef inDriver
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "Ech0VirtualMic_DoIOOperation: bad device ID");
 	FailWithAction(inStreamObjectID != kObjectID_Stream_Input, theAnswer = kAudioHardwareBadObjectError, Done, "Ech0VirtualMic_DoIOOperation: bad stream ID");
 
-	//	clear the buffer if this iskAudioServerPlugInIOOperationReadInput
 	if(inOperationID == kAudioServerPlugInIOOperationReadInput)
 	{
 		Float32* output = (Float32*)ioMainBuffer;
-		UInt64 readIndex = atomic_load_explicit(&gPCMReadIndex, memory_order_relaxed);
-		UInt64 writeIndex = atomic_load_explicit(&gPCMWriteIndex, memory_order_acquire);
-		if(writeIndex - readIndex > kPCMBufferCapacity)
+		memset(output, 0, inIOBufferFrameSize * 2 * sizeof(Float32));
+
+		// Never make the real-time audio thread wait for the property writer.
+		if(pthread_mutex_trylock(&gPCMBufferMutex) != 0)
 		{
-			readIndex = writeIndex - kPCMBufferCapacity;
+			goto Done;
 		}
-		UInt64 available = writeIndex - readIndex;
+
+		UInt64 available = gPCMWriteIndex - gPCMReadIndex;
 		UInt64 framesToRead = available < inIOBufferFrameSize ? available : inIOBufferFrameSize;
 		for(UInt64 frame = 0; frame < framesToRead; ++frame)
 		{
-			Float32 sample = ((Float32)gPCMBuffer[(readIndex + frame) % kPCMBufferCapacity]) / 32768.0f;
+			Float32 sample = ((Float32)gPCMBuffer[(gPCMReadIndex + frame) % kPCMBufferCapacity]) / 32768.0f;
 			output[frame * 2] = sample;
 			output[frame * 2 + 1] = sample;
 		}
-		if(framesToRead < inIOBufferFrameSize)
-		{
-			memset(output + (framesToRead * 2), 0, (inIOBufferFrameSize - framesToRead) * 2 * sizeof(Float32));
-		}
-		atomic_store_explicit(&gPCMReadIndex, readIndex + framesToRead, memory_order_release);
+		gPCMReadIndex += framesToRead;
+		pthread_mutex_unlock(&gPCMBufferMutex);
 	}
 
 Done:
