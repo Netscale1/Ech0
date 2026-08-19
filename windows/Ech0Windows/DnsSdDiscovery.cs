@@ -7,6 +7,7 @@ internal sealed record DiscoveredService(string InstanceName, string HostName, i
 
 internal static class DnsSdDiscovery
 {
+    private const uint ErrorCancelled = 1223;
     private const uint DnsRequestPending = 9506;
     private const ushort DnsTypePtr = 12;
 
@@ -23,13 +24,33 @@ internal static class DnsSdDiscovery
         return serviceName is null ? null : await ResolveAsync(serviceName, timeoutSource.Token);
     }
 
+    public static async Task<bool> WaitForServiceAsync(CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10))
+        {
+            return false;
+        }
+
+        return await BrowseFirstNameAsync(cancellationToken) is not null;
+    }
+
     private static async Task<string?> BrowseFirstNameAsync(CancellationToken cancellationToken)
     {
         var completion = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        BrowseCallback callback = (_, _, records) =>
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        BrowseCallback callback = (status, _, records) =>
         {
             try
             {
+                if (status == ErrorCancelled)
+                {
+                    return;
+                }
+                if (status != 0)
+                {
+                    completion.TrySetResult(null);
+                    return;
+                }
                 for (var record = records; record != IntPtr.Zero; record = Marshal.ReadIntPtr(record, 0))
                 {
                     if ((ushort)Marshal.ReadInt16(record, IntPtr.Size * 2) != DnsTypePtr)
@@ -50,6 +71,10 @@ internal static class DnsSdDiscovery
                 if (records != IntPtr.Zero)
                 {
                     DnsRecordListFree(records, 1);
+                }
+                if (status == ErrorCancelled)
+                {
+                    stopped.TrySetResult();
                 }
             }
         };
@@ -77,7 +102,11 @@ internal static class DnsSdDiscovery
         {
             if (cancel.Reserved != IntPtr.Zero)
             {
-                DnsServiceBrowseCancel(ref cancel);
+                var status = DnsServiceBrowseCancel(ref cancel);
+                if (status == 0)
+                {
+                    await stopped.Task;
+                }
             }
             Marshal.FreeHGlobal(queryName);
             GC.KeepAlive(callback);

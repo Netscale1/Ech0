@@ -433,6 +433,70 @@ public sealed class ProtocolTests
     }
 
     [Fact]
+    public async Task ReconnectWaitWakesWhenDnsSdFindsTheService()
+    {
+        var fallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var reason = await ReconnectWait.WaitAsync(
+            fallback.Task,
+            Task.FromResult(true),
+            CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1));
+
+        Assert.Equal(ReconnectWakeReason.ServiceAvailable, reason);
+    }
+
+    [Fact]
+    public async Task ReconnectWaitKeepsFallbackWhenDnsSdIsUnavailable()
+    {
+        var fallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var wait = ReconnectWait.WaitAsync(
+            fallback.Task,
+            Task.FromResult(false),
+            CancellationToken.None);
+
+        Assert.False(wait.IsCompleted);
+        fallback.SetResult();
+
+        Assert.Equal(ReconnectWakeReason.FallbackDelay, await wait);
+    }
+
+    [Fact]
+    public async Task ReconnectWaitKeepsFallbackWhenNoServiceAppears()
+    {
+        var serviceAvailable = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var reason = await ReconnectWait.WaitAsync(
+            Task.CompletedTask,
+            serviceAvailable.Task,
+            CancellationToken.None);
+
+        Assert.Equal(ReconnectWakeReason.FallbackDelay, reason);
+    }
+
+    [Fact]
+    public async Task ReconnectWaitObservesCancellation()
+    {
+        var fallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var serviceAvailable = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation = new CancellationTokenSource();
+        var wait = ReconnectWait.WaitAsync(fallback.Task, serviceAvailable.Task, cancellation.Token);
+
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => wait);
+    }
+
+    [Fact]
+    public async Task DnsSdBrowseCanBeCancelledCleanly()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        _ = await DnsSdDiscovery.WaitForServiceAsync(cancellation.Token)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public async Task ConnectionTaskGroupJoinsSiblingCleanupBeforePropagatingFailure()
     {
         var primaryFailure = new InvalidOperationException("primary failure");

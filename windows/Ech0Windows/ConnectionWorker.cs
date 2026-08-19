@@ -24,6 +24,36 @@ internal static class RoundTripTime
     }
 }
 
+internal enum ReconnectWakeReason
+{
+    FallbackDelay,
+    ServiceAvailable,
+}
+
+internal static class ReconnectWait
+{
+    public static async Task<ReconnectWakeReason> WaitAsync(
+        Task fallbackDelay,
+        Task<bool>? serviceAvailable,
+        CancellationToken cancellationToken)
+    {
+        if (serviceAvailable is null)
+        {
+            await fallbackDelay.WaitAsync(cancellationToken);
+            return ReconnectWakeReason.FallbackDelay;
+        }
+
+        var completed = await Task.WhenAny(fallbackDelay, serviceAvailable).WaitAsync(cancellationToken);
+        if (ReferenceEquals(completed, serviceAvailable) && await serviceAvailable)
+        {
+            return ReconnectWakeReason.ServiceAvailable;
+        }
+
+        await fallbackDelay.WaitAsync(cancellationToken);
+        return ReconnectWakeReason.FallbackDelay;
+    }
+}
+
 internal sealed class ConnectionWorker : IAsyncDisposable
 {
     private readonly Ech0Settings settings;
@@ -79,52 +109,121 @@ internal sealed class ConnectionWorker : IAsyncDisposable
     private async Task RunReconnectLoopAsync(CancellationToken cancellationToken)
     {
         var backoffSeconds = 1;
-        while (!cancellationToken.IsCancellationRequested)
+        var discoveryStarted = false;
+        CancellationTokenSource? discoveryStop = null;
+        Task<bool>? serviceAvailable = null;
+
+        async Task StopDiscoveryAsync()
         {
-            StateChanged?.Invoke(this, AgentState.Connecting, null);
+            discoveryStop?.Cancel();
+            if (serviceAvailable is not null)
+            {
+                try
+                {
+                    await serviceAvailable;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                }
+            }
+            discoveryStop?.Dispose();
+            discoveryStop = null;
+            serviceAvailable = null;
+            discoveryStarted = false;
+        }
+
+        async Task<bool> WatchForServiceAsync(CancellationToken discoveryCancellationToken)
+        {
             try
             {
-                await RunConnectionAsync(cancellationToken);
-                backoffSeconds = 1;
+                return await DnsSdDiscovery.WaitForServiceAsync(discoveryCancellationToken);
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (discoveryCancellationToken.IsCancellationRequested)
             {
-                break;
-            }
-            catch (PairingRequiredException exception)
-            {
-                Log.Write("pairing_required", exception.Message);
-                settings.MarkPairingRequired();
-                SettingsStore.Save(settings);
-                StateChanged?.Invoke(this, AgentState.PairingRequired, null);
-                return;
+                return false;
             }
             catch (Exception exception)
             {
-                Log.Write("connection_failed", exception.GetType().Name);
-                StateChanged?.Invoke(this, AgentState.Disconnected, exception.GetType().Name);
+                Log.Write("discovery_unavailable", exception.GetType().Name);
+                return false;
             }
-            finally
-            {
-                capture.Stop();
-                stream?.Dispose();
-                stream = null;
-                demandActive = false;
-            }
+        }
 
-            try
+        async Task ConnectedAsync()
+        {
+            backoffSeconds = 1;
+            await StopDiscoveryAsync();
+        }
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
             {
-                await Task.Delay(TimeSpan.FromSeconds(backoffSeconds), cancellationToken);
+                StateChanged?.Invoke(this, AgentState.Connecting, null);
+                try
+                {
+                    await RunConnectionAsync(cancellationToken, ConnectedAsync);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (PairingRequiredException exception)
+                {
+                    Log.Write("pairing_required", exception.Message);
+                    settings.MarkPairingRequired();
+                    SettingsStore.Save(settings);
+                    StateChanged?.Invoke(this, AgentState.PairingRequired, null);
+                    return;
+                }
+                catch (Exception exception)
+                {
+                    Log.Write("connection_failed", exception.GetType().Name);
+                    StateChanged?.Invoke(this, AgentState.Disconnected, exception.GetType().Name);
+                }
+                finally
+                {
+                    capture.Stop();
+                    stream?.Dispose();
+                    stream = null;
+                    demandActive = false;
+                }
+
+                if (!discoveryStarted)
+                {
+                    discoveryStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    serviceAvailable = WatchForServiceAsync(discoveryStop.Token);
+                    discoveryStarted = true;
+                }
+
+                try
+                {
+                    var wakeReason = await ReconnectWait.WaitAsync(
+                        Task.Delay(TimeSpan.FromSeconds(backoffSeconds), cancellationToken),
+                        serviceAvailable,
+                        cancellationToken);
+                    if (wakeReason == ReconnectWakeReason.ServiceAvailable)
+                    {
+                        Log.Write("reconnect_discovery_wake");
+                        serviceAvailable = null;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                backoffSeconds = Math.Min(backoffSeconds * 2, 8);
             }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            backoffSeconds = Math.Min(backoffSeconds * 2, 8);
+        }
+        finally
+        {
+            await StopDiscoveryAsync();
         }
     }
 
-    private async Task RunConnectionAsync(CancellationToken cancellationToken)
+    private async Task RunConnectionAsync(
+        CancellationToken cancellationToken,
+        Func<Task> connected)
     {
         demandGeneration = 0;
         demandActive = false;
@@ -135,6 +234,7 @@ internal sealed class ConnectionWorker : IAsyncDisposable
             settings,
             cancellationToken);
         stream = authenticated.Stream;
+        await connected();
         lastPongTimestamp = Stopwatch.GetTimestamp();
         Volatile.Write(ref lastRoundTripMs, -1);
 
