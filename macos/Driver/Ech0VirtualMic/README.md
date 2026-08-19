@@ -18,9 +18,9 @@ Build without installing:
 ```
 
 The resulting bundle is `dist/macos/Ech0VirtualMic.driver`. The build also runs
-an in-process smoke test that verifies the input-only topology, PCM handoff,
-sample conversion, and buffer reset. The driver bundle is neither signed nor
-installed.
+deterministic smoke tests for the input-only 48 kHz topology, PCM handoff,
+conversion and overflow, plus a dedicated ThreadSanitizer test for concurrent
+write, clear and read. The driver bundle is neither signed nor installed.
 
 Runtime validation requires signing the bundle with a macOS code-signing
 identity, installing it in `/Library/Audio/Plug-Ins/HAL`, and restarting macOS
