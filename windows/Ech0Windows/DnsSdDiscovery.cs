@@ -4,7 +4,7 @@ using System.Threading.Channels;
 
 namespace Ech0.Windows;
 
-internal sealed record DiscoveredService(string InstanceName, string HostName, int Port);
+internal sealed record DiscoveredService(string HostName, int Port);
 
 internal sealed class ServiceAvailabilityEvents
 {
@@ -267,12 +267,11 @@ internal static class DnsSdDiscovery
             try
             {
                 var instance = Marshal.PtrToStructure<DnsServiceInstance>(instancePointer);
-                var resolvedName = Marshal.PtrToStringUni(instance.InstanceName) ?? instanceName;
                 var hostName = Marshal.PtrToStringUni(instance.HostName)?.TrimEnd('.');
                 completion.TrySetResult(
                     string.IsNullOrWhiteSpace(hostName)
                         ? null
-                        : new DiscoveredService(resolvedName, hostName, instance.Port));
+                        : new DiscoveredService(hostName, instance.Port));
             }
             finally
             {
