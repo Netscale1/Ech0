@@ -28,3 +28,19 @@ jobs:
       - name: Test and build unsigned development artifact
         shell: pwsh
         run: ./scripts/release-windows.ps1 -AllowUnsignedDevelopment
+      - name: Smoke-test autonomous Windows gate
+        shell: pwsh
+        run: |
+          $candidate = Join-Path $PWD "dist\windows\publish\Ech0Windows.exe"
+          $state = Join-Path $env:RUNNER_TEMP "ech0-windows-live-gate.json"
+          $version = (Get-Item -LiteralPath $candidate).VersionInfo.ProductVersion
+          ./scripts/windows-live-gate.ps1 `
+            -Action Start `
+            -StatePath $state `
+            -CandidateExecutable $candidate `
+            -ExpectedProductVersion $version
+          try {
+            ./scripts/windows-live-gate.ps1 -Action Observe -StatePath $state
+          } finally {
+            ./scripts/windows-live-gate.ps1 -Action Stop -StatePath $state
+          }

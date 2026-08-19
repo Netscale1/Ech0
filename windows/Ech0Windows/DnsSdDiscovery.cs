@@ -82,15 +82,14 @@ internal static class DnsSdDiscovery
     internal sealed class ServiceWatcher : IAsyncDisposable
     {
         private readonly ServiceAvailabilityEvents events = new();
-        private readonly TaskCompletionSource stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly BrowseCallback callback;
+        private readonly MdnsQueryCallback callback;
         private readonly IntPtr queryName;
-        private DnsServiceCancel cancel;
+        private MdnsQueryHandle handle;
         private int disposed;
 
         public ServiceWatcher()
         {
-            callback = OnBrowse;
+            callback = OnResult;
             queryName = Marshal.StringToHGlobalUni("_ech0._tcp.local");
         }
 
@@ -99,16 +98,21 @@ internal static class DnsSdDiscovery
 
         public bool Start()
         {
-            var request = new DnsServiceBrowseRequest
+            var request = new MdnsQueryRequest
             {
                 Version = 1,
+                ReferenceCount = 0,
+                Query = queryName,
+                QueryType = DnsTypePtr,
+                QueryOptions = 0,
                 InterfaceIndex = 0,
-                QueryName = queryName,
                 Callback = callback,
                 QueryContext = IntPtr.Zero,
+                AnswerReceived = 0,
+                ResendCount = 0,
             };
-            var status = DnsServiceBrowse(ref request, ref cancel);
-            if (status == DnsRequestPending)
+            var status = DnsStartMulticastQuery(ref request, ref handle);
+            if (status == 0)
             {
                 return true;
             }
@@ -127,34 +131,32 @@ internal static class DnsSdDiscovery
             }
 
             events.Complete();
-            if (cancel.Reserved != IntPtr.Zero)
-            {
-                var status = DnsServiceBrowseCancel(ref cancel);
-                if (status == 0)
-                {
-                    await stopped.Task;
-                }
-            }
+            _ = DnsStopMulticastQuery(ref handle);
             Marshal.FreeHGlobal(queryName);
             GC.KeepAlive(callback);
+            await ValueTask.CompletedTask;
         }
 
-        private void OnBrowse(uint status, IntPtr _, IntPtr records)
+        private void OnResult(IntPtr _, IntPtr __, IntPtr resultPointer)
         {
+            if (resultPointer == IntPtr.Zero)
+            {
+                return;
+            }
+            var result = Marshal.PtrToStructure<DnsQueryResult>(resultPointer);
+            var records = result.QueryRecords;
             try
             {
-                if (status == ErrorCancelled)
-                {
-                    return;
-                }
-                if (status != 0)
+                if (result.QueryStatus != 0)
                 {
                     events.Complete();
                     return;
                 }
                 for (var record = records; record != IntPtr.Zero; record = Marshal.ReadIntPtr(record, 0))
                 {
-                    if ((ushort)Marshal.ReadInt16(record, IntPtr.Size * 2) == DnsTypePtr)
+                    var type = (ushort)Marshal.ReadInt16(record, IntPtr.Size * 2);
+                    var timeToLive = (uint)Marshal.ReadInt32(record, 24);
+                    if (type == DnsTypePtr && timeToLive > 0)
                     {
                         events.Notify();
                         break;
@@ -166,10 +168,6 @@ internal static class DnsSdDiscovery
                 if (records != IntPtr.Zero)
                 {
                     DnsRecordListFree(records, 1);
-                }
-                if (status == ErrorCancelled)
-                {
-                    stopped.TrySetResult();
                 }
             }
         }
@@ -315,6 +313,47 @@ internal static class DnsSdDiscovery
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate void ResolveCallback(uint status, IntPtr queryContext, IntPtr instance);
 
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    internal delegate void MdnsQueryCallback(
+        IntPtr queryContext,
+        IntPtr queryHandle,
+        IntPtr queryResults);
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MdnsQueryRequest
+    {
+        public uint Version;
+        public uint ReferenceCount;
+        public IntPtr Query;
+        public ushort QueryType;
+        public ulong QueryOptions;
+        public uint InterfaceIndex;
+        public MdnsQueryCallback Callback;
+        public IntPtr QueryContext;
+        public int AnswerReceived;
+        public uint ResendCount;
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 544)]
+    internal struct MdnsQueryHandle
+    {
+        [FieldOffset(512)] public ushort Type;
+        [FieldOffset(520)] public IntPtr Subscription;
+        [FieldOffset(528)] public IntPtr CallbackParameters;
+        [FieldOffset(536)] public uint StateNameData0;
+        [FieldOffset(540)] public uint StateNameData1;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DnsQueryResult
+    {
+        public uint Version;
+        public uint QueryStatus;
+        public ulong QueryOptions;
+        public IntPtr QueryRecords;
+        public IntPtr Reserved;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct DnsServiceBrowseRequest
     {
@@ -368,6 +407,14 @@ internal static class DnsSdDiscovery
 
     [DllImport("dnsapi.dll")]
     private static extern uint DnsServiceResolveCancel(ref DnsServiceCancel cancel);
+
+    [DllImport("dnsapi.dll", CharSet = CharSet.Unicode)]
+    private static extern uint DnsStartMulticastQuery(
+        ref MdnsQueryRequest queryRequest,
+        ref MdnsQueryHandle handle);
+
+    [DllImport("dnsapi.dll")]
+    private static extern uint DnsStopMulticastQuery(ref MdnsQueryHandle handle);
 
     [DllImport("dnsapi.dll")]
     private static extern void DnsServiceFreeInstance(IntPtr instance);

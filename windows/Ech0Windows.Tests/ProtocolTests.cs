@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Xunit;
 
@@ -7,6 +8,22 @@ namespace Ech0.Windows.Tests;
 
 public sealed class ProtocolTests
 {
+    [Fact]
+    public void MdnsNativeLayoutsMatchTheWindowsX64Sdk()
+    {
+        Assert.Equal(64, Marshal.SizeOf<DnsSdDiscovery.MdnsQueryRequest>());
+        Assert.Equal(24, Marshal.OffsetOf<DnsSdDiscovery.MdnsQueryRequest>(
+            nameof(DnsSdDiscovery.MdnsQueryRequest.QueryOptions)).ToInt32());
+        Assert.Equal(40, Marshal.OffsetOf<DnsSdDiscovery.MdnsQueryRequest>(
+            nameof(DnsSdDiscovery.MdnsQueryRequest.Callback)).ToInt32());
+        Assert.Equal(544, Marshal.SizeOf<DnsSdDiscovery.MdnsQueryHandle>());
+        Assert.Equal(520, Marshal.OffsetOf<DnsSdDiscovery.MdnsQueryHandle>(
+            nameof(DnsSdDiscovery.MdnsQueryHandle.Subscription)).ToInt32());
+        Assert.Equal(32, Marshal.SizeOf<DnsSdDiscovery.DnsQueryResult>());
+        Assert.Equal(16, Marshal.OffsetOf<DnsSdDiscovery.DnsQueryResult>(
+            nameof(DnsSdDiscovery.DnsQueryResult.QueryRecords)).ToInt32());
+    }
+
     [Fact]
     public void LoggingIoFailureDoesNotEscapeIntoRuntime()
     {

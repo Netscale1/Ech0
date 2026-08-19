@@ -14,13 +14,14 @@ internal sealed class AgentApplicationContext : ApplicationContext
     private readonly Icon unavailableIcon = TrayIcons.Load("Ech0Unavailable.ico");
     private readonly Icon capturingIcon = TrayIcons.Load("Ech0Capturing.ico");
     private readonly SemaphoreSlim workerLifecycleGate = new(1, 1);
+    private AutomationShutdownListener? automationControl;
     private Ech0Settings settings;
     private ConnectionWorker? worker;
     private bool paused;
     private bool isExiting;
     private AgentState currentState = AgentState.Disconnected;
 
-    public AgentApplicationContext()
+    public AgentApplicationContext(AutomationControlOptions? automationControlOptions = null)
     {
         settings = SettingsStore.Load();
         dispatcher.CreateControl();
@@ -40,6 +41,13 @@ internal sealed class AgentApplicationContext : ApplicationContext
         tray.Text = "Ech0: starting";
         tray.Visible = true;
         tray.DoubleClick += (_, _) => ShowSettings();
+
+        if (automationControlOptions is not null)
+        {
+            automationControl = new AutomationShutdownListener(
+                automationControlOptions,
+                RequestAutomationExit);
+        }
 
         if (!settings.IsConfigured)
         {
@@ -206,17 +214,36 @@ internal sealed class AgentApplicationContext : ApplicationContext
 
     private async Task ExitAsync()
     {
+        if (isExiting)
+        {
+            return;
+        }
         isExiting = true;
         tray.Visible = false;
         await StopWorkerAsync();
+        if (automationControl is not null)
+        {
+            await automationControl.DisposeAsync();
+            automationControl = null;
+        }
         tray.Dispose();
         ExitThread();
+    }
+
+    private void RequestAutomationExit()
+    {
+        if (!dispatcher.IsDisposed)
+        {
+            dispatcher.BeginInvoke(new Action(() => _ = ExitAsync()));
+        }
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
+            automationControl?.Dispose();
+            automationControl = null;
             tray.Dispose();
             dispatcher.Dispose();
             disconnectedIcon.Dispose();
