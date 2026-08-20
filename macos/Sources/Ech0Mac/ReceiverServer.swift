@@ -109,6 +109,12 @@ struct ReceiverProtocolSupport {
     }
 }
 
+enum ReceiverServiceInstanceName {
+    static func make(sessionID: UUID = UUID()) -> String {
+        "Ech0 \(sessionID.uuidString.lowercased())"
+    }
+}
+
 final class ReceiverServer: @unchecked Sendable {
     enum ConnectionState: Equatable {
         case idle
@@ -227,7 +233,7 @@ final class ReceiverServer: @unchecked Sendable {
         }
 
         newListener.service = NWListener.Service(
-            name: Host.current().localizedName ?? "Ech0 Mac",
+            name: ReceiverServiceInstanceName.make(),
             type: "_ech0._tcp"
         )
 

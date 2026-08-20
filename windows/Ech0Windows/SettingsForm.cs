@@ -283,7 +283,7 @@ internal sealed class SettingsForm : Form
             }
             host.Text = result.HostName;
             port.Value = result.Port;
-            discoveryStatus.Text = $"Found {result.InstanceName}";
+            discoveryStatus.Text = $"Found {result.HostName}";
         }
         catch (OperationCanceledException) when (formLifetime.IsCancellationRequested)
         {

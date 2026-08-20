@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Xunit;
 
@@ -7,6 +8,30 @@ namespace Ech0.Windows.Tests;
 
 public sealed class ProtocolTests
 {
+    [Fact]
+    public void MdnsNativeLayoutsMatchTheWindowsX64Sdk()
+    {
+        Assert.Equal(64, Marshal.SizeOf<DnsSdDiscovery.MdnsQueryRequest>());
+        Assert.Equal(24, Marshal.OffsetOf<DnsSdDiscovery.MdnsQueryRequest>(
+            nameof(DnsSdDiscovery.MdnsQueryRequest.QueryOptions)).ToInt32());
+        Assert.Equal(40, Marshal.OffsetOf<DnsSdDiscovery.MdnsQueryRequest>(
+            nameof(DnsSdDiscovery.MdnsQueryRequest.Callback)).ToInt32());
+        Assert.Equal(544, Marshal.SizeOf<DnsSdDiscovery.MdnsQueryHandle>());
+        Assert.Equal(520, Marshal.OffsetOf<DnsSdDiscovery.MdnsQueryHandle>(
+            nameof(DnsSdDiscovery.MdnsQueryHandle.Subscription)).ToInt32());
+        Assert.Equal(32, Marshal.SizeOf<DnsSdDiscovery.DnsQueryResult>());
+        Assert.Equal(16, Marshal.OffsetOf<DnsSdDiscovery.DnsQueryResult>(
+            nameof(DnsSdDiscovery.DnsQueryResult.QueryRecords)).ToInt32());
+    }
+
+    [Fact]
+    public async Task MdnsWatcherStartsAndStopsWithTheWindowsApi()
+    {
+        await using var watcher = new DnsSdDiscovery.ServiceWatcher();
+
+        Assert.True(watcher.Start());
+    }
+
     [Fact]
     public void LoggingIoFailureDoesNotEscapeIntoRuntime()
     {
@@ -430,6 +455,138 @@ public sealed class ProtocolTests
         await using var worker = new ConnectionWorker(new Ech0Settings(), initiallyPaused: true);
 
         Assert.True(worker.IsPaused);
+    }
+
+    [Fact]
+    public async Task ReconnectWaitWakesWhenDnsSdFindsTheService()
+    {
+        var fallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var reason = await ReconnectWait.WaitAsync(
+            fallback.Task,
+            Task.FromResult(true),
+            TestContext.Current.CancellationToken).WaitAsync(
+                TimeSpan.FromSeconds(1),
+                TestContext.Current.CancellationToken);
+
+        Assert.Equal(ReconnectWakeReason.ServiceAvailable, reason);
+    }
+
+    [Fact]
+    public async Task ReconnectWaitKeepsFallbackWhenDnsSdIsUnavailable()
+    {
+        var fallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var wait = ReconnectWait.WaitAsync(
+            fallback.Task,
+            Task.FromResult(false),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(wait.IsCompleted);
+        fallback.SetResult();
+
+        Assert.Equal(ReconnectWakeReason.FallbackDelay, await wait);
+    }
+
+    [Fact]
+    public async Task ReconnectWaitKeepsFallbackWhenNoServiceAppears()
+    {
+        var serviceAvailable = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var reason = await ReconnectWait.WaitAsync(
+            Task.CompletedTask,
+            serviceAvailable.Task,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ReconnectWakeReason.FallbackDelay, reason);
+    }
+
+    [Fact]
+    public async Task ReconnectWaitObservesCancellation()
+    {
+        var fallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var serviceAvailable = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation = new CancellationTokenSource();
+        var wait = ReconnectWait.WaitAsync(fallback.Task, serviceAvailable.Task, cancellation.Token);
+
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => wait);
+    }
+
+    [Fact]
+    public async Task ServiceAvailabilityEventsPreserveARealWakeAfterAStaleWake()
+    {
+        var events = new ServiceAvailabilityEvents();
+        var fallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        events.Notify();
+        Assert.Equal(
+            ReconnectWakeReason.ServiceAvailable,
+            await ReconnectWait.WaitAsync(
+                fallback.Task,
+                events.WaitAsync(TestContext.Current.CancellationToken),
+                TestContext.Current.CancellationToken));
+
+        var freshWake = ReconnectWait.WaitAsync(
+            fallback.Task,
+            events.WaitAsync(TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+        Assert.False(freshWake.IsCompleted);
+
+        events.Notify();
+        Assert.Equal(ReconnectWakeReason.ServiceAvailable, await freshWake);
+    }
+
+    [Fact]
+    public async Task ServiceAvailabilityEventsCoalesceCallbackBursts()
+    {
+        var events = new ServiceAvailabilityEvents();
+
+        events.Notify();
+        events.Notify();
+        Assert.True(await events.WaitAsync(TestContext.Current.CancellationToken));
+
+        var nextWake = events.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.False(nextWake.IsCompleted);
+
+        events.Notify();
+        Assert.True(await nextWake);
+    }
+
+    [Fact]
+    public async Task CompletingServiceAvailabilityEventsReleasesPendingWaiter()
+    {
+        var events = new ServiceAvailabilityEvents();
+        var pending = events.WaitAsync(TestContext.Current.CancellationToken);
+
+        events.Complete();
+
+        Assert.False(await pending);
+    }
+
+    [Fact]
+    public async Task DnsSdBrowseCanBeCancelledCleanly()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        _ = await DnsSdDiscovery.WaitForServiceAsync(
+                TimeSpan.FromSeconds(5),
+                cancellation.Token)
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task DnsSdServiceWatcherCanBeDisposedCleanly()
+    {
+        var watcher = DnsSdDiscovery.StartServiceWatcher();
+        if (watcher is null)
+        {
+            return;
+        }
+
+        await watcher.DisposeAsync().AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     }
 
     [Fact]
