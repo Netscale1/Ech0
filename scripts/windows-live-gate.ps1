@@ -18,7 +18,7 @@ $logPath = Join-Path $env:LOCALAPPDATA "Ech0\logs\ech0.log"
 $settingsPath = Join-Path $env:LOCALAPPDATA "Ech0\settings.json"
 
 function Get-Ech0Processes {
-    @(Get-CimInstance Win32_Process | Where-Object Name -eq "Ech0Windows.exe")
+    @(Get-Process -Name "Ech0Windows" -ErrorAction SilentlyContinue)
 }
 
 function Get-RegistryTreeHash {
@@ -101,11 +101,12 @@ function Read-State {
 function Assert-CandidateIdentity {
     param($State)
 
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($State.Pid)"
-    if ($null -eq $process -or $process.Name -ne "Ech0Windows.exe") {
+    $process = Get-Process -Id $State.Pid -ErrorAction SilentlyContinue
+    if ($null -eq $process -or $process.ProcessName -ne "Ech0Windows") {
         throw "Candidate PID $($State.Pid) is not running."
     }
-    if (-not $process.ExecutablePath.Equals($State.CandidatePath, [StringComparison]::OrdinalIgnoreCase)) {
+    if ([string]::IsNullOrWhiteSpace($process.Path) -or
+        -not $process.Path.Equals($State.CandidatePath, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Candidate path changed; refusing control request."
     }
     $file = Get-Item -LiteralPath $State.CandidatePath
